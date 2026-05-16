@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
-
 from reposage import __version__
 from reposage.api.main import create_app
 from reposage.retrieval.hybrid import rrf_fuse

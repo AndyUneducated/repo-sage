@@ -4,7 +4,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
 from reposage.config import Settings, get_settings
 
 

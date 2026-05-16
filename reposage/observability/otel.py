@@ -33,12 +33,14 @@ def setup_tracing(service_name: str, endpoint: str) -> None:
         return
 
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True)))
+    provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
+    )
     trace.set_tracer_provider(provider)
     _INITIALISED = True
 
 
-def get_tracer(name: str = "reposage") -> "Tracer":
+def get_tracer(name: str = "reposage") -> Tracer:
     from opentelemetry import trace
 
     return trace.get_tracer(name)

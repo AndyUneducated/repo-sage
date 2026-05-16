@@ -14,5 +14,7 @@ class CrossEncoderReranker:
         self.model_name = model_name or settings.reranker_model
         self._model: object | None = None
 
-    def rerank(self, query: str, chunks: Sequence[RetrievedChunk], top_k: int = 8) -> list[RetrievedChunk]:
+    def rerank(
+        self, query: str, chunks: Sequence[RetrievedChunk], top_k: int = 8
+    ) -> list[RetrievedChunk]:
         raise NotImplementedError

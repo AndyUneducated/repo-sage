@@ -32,14 +32,15 @@ class TreeSitterParser:
 
     def detect_language(self, path: Path) -> Language | None:
         ext = path.suffix.lower()
-        return {
+        by_ext: dict[str, Language] = {
             ".py": "python",
             ".ts": "typescript",
             ".tsx": "typescript",
             ".js": "javascript",
             ".jsx": "javascript",
             ".go": "go",
-        }.get(ext)
+        }
+        return by_ext.get(ext)
 
     def parse(self, path: Path) -> ParseResult | None:
         """Parse a single file. Returns `None` for unsupported extensions."""

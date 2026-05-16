@@ -23,9 +23,13 @@ def load_questions(path: Path = QUESTIONS_PATH) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cross-file QA benchmark")
-    parser.add_argument("--repo-set", default="defaults", help="Named repo set to evaluate against.")
+    parser.add_argument(
+        "--repo-set", default="defaults", help="Named repo set to evaluate against."
+    )
     parser.add_argument("--route", default="auto", choices=["auto", "graph", "community", "hybrid"])
-    parser.add_argument("--out", type=Path, default=Path("benchmarks/cross_file_qa/results/latest.csv"))
+    parser.add_argument(
+        "--out", type=Path, default=Path("benchmarks/cross_file_qa/results/latest.csv")
+    )
     args = parser.parse_args()
 
     questions = load_questions()

@@ -37,5 +37,7 @@ class SQLiteSymbolGraphStore:
     def callees_of(self, fqn: str) -> list[SymbolEdge]:
         raise NotImplementedError
 
-    def edges(self, fqn: str, kind: EdgeKind | None = None, direction: str = "out") -> list[SymbolEdge]:
+    def edges(
+        self, fqn: str, kind: EdgeKind | None = None, direction: str = "out"
+    ) -> list[SymbolEdge]:
         raise NotImplementedError

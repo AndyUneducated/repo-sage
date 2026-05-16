@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -16,7 +16,9 @@ from reposage.observability.otel import setup_tracing
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    setup_tracing(service_name=settings.otel_service_name, endpoint=settings.otel_exporter_otlp_endpoint)
+    setup_tracing(
+        service_name=settings.otel_service_name, endpoint=settings.otel_exporter_otlp_endpoint
+    )
     yield
 
 

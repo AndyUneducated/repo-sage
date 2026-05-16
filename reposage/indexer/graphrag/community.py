@@ -14,10 +14,10 @@ from reposage.indexer.symbol_graph import SymbolGraph
 @dataclass(slots=True, frozen=True)
 class Community:
     id: int
-    members: tuple[str, ...]            # symbol FQNs
-    level: int                          # hierarchy depth (Leiden produces nested)
+    members: tuple[str, ...]  # symbol FQNs
+    level: int  # hierarchy depth (Leiden produces nested)
     parent_id: int | None
-    summary: str | None = None          # filled in by `CommunitySummarizer`
+    summary: str | None = None  # filled in by `CommunitySummarizer`
 
 
 class CommunityDetector:
