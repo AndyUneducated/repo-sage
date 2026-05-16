@@ -24,7 +24,7 @@ make dev
 
 要求：
 
-- Python 3.11+（推荐用 [`uv`](https://docs.astral.sh/uv/) 管理）
+- Python 3.12+（推荐用 [`uv`](https://docs.astral.sh/uv/) 管理）
 - Go 1.22+
 - SQLite（系统自带即可）
 - 本地 LLM 推理：可选 Ollama，或在 `.env` 里配 LiteLLM 兼容的云端 provider

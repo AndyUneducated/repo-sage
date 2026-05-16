@@ -7,7 +7,7 @@ name = "reposage"
 version = "0.1.0"
 description = "Repository-level code Q&A with dual-index (Symbol Graph + GraphRAG) and a self-built Go HNSW vector store."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Anning" }]
 keywords = ["code-search", "rag", "graphrag", "hnsw", "tree-sitter", "github-app"]
@@ -16,7 +16,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
 ]
@@ -31,28 +30,28 @@ dependencies = [
     "tree-sitter-languages>=1.10",
     "numpy>=1.26",
     "rank-bm25>=0.2.2",
-    "litellm>=1.45",
+    "litellm>=1.60",
     "sentence-transformers>=3.0",
     "networkx>=3.3",
     "python-igraph>=0.11",         # for Leiden community detection
     "leidenalg>=0.10",
-    "structlog>=24.1",
-    "opentelemetry-api>=1.27",
-    "opentelemetry-sdk>=1.27",
-    "opentelemetry-exporter-otlp>=1.27",
-    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "structlog>=24.4",
+    "opentelemetry-api>=1.30",
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp>=1.30",
+    "opentelemetry-instrumentation-fastapi>=0.51b0",
     "typer>=0.12",
     "rich>=13.7",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.2",
-    "pytest-asyncio>=0.23",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
-    "ruff>=0.6",
-    "mypy>=1.11",
-    "pre-commit>=3.8",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
     "types-requests",
     "ipython",
 ]
@@ -75,7 +74,7 @@ packages = ["reposage"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["reposage", "tests", "benchmarks"]
 
 [tool.ruff.lint]
@@ -105,7 +104,7 @@ ignore = [
 docstring-code-format = true
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_unreachable = true
 no_implicit_optional = true
