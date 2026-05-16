@@ -1,0 +1,36 @@
+services:
+  hnsw:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: hnsw-builder
+    command: ["/out/hnsw-server", "--addr=0.0.0.0:50051", "--data-dir=/data"]
+    volumes:
+      - hnsw-data:/data
+    ports:
+      - "50051:50051"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file: .env
+    environment:
+      HNSW_GRPC_ADDR: hnsw:50051
+    depends_on:
+      - hnsw
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./docker/otel-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+
+volumes:
+  hnsw-data:

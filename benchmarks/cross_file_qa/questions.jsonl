@@ -1,0 +1,1 @@
+{"id":"sample-001","repo":"langchain-ai/langchain","question":"Where is BaseChatModel._generate called?","reference_answer":"","reference_citations":[],"bucket":"graph","language":"python"}

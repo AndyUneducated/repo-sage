@@ -1,0 +1,60 @@
+name: CI · Python
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "reposage/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci-python.yml"
+  pull_request:
+    paths:
+      - "reposage/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci-python.yml"
+
+concurrency:
+  group: ci-python-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: |
+          ruff check reposage tests benchmarks
+          ruff format --check reposage tests benchmarks
+
+      - name: Type-check (mypy)
+        run: mypy reposage
+
+      - name: Test
+        run: pytest --cov=reposage --cov-report=xml -q
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml

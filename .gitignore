@@ -1,0 +1,76 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.hypothesis/
+
+# --- Go ---
+go-hnsw/bin/
+go-hnsw/*.test
+go-hnsw/*.out
+go-hnsw/coverage.out
+go-hnsw/vendor/
+
+# --- Node (Probot, if used) ---
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# --- Data / models / artifacts ---
+data/
+models/
+*.bin
+*.pt
+*.onnx
+*.faiss
+*.hnsw
+*.mmap
+indexes/
+.cache/
+
+# --- Benchmarks output ---
+benchmarks/**/results/
+benchmarks/**/*.csv
+benchmarks/**/*.json
+!benchmarks/**/expected_*.json
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# --- Env / secrets ---
+.env
+.env.local
+*.pem
+*.key
+
+# --- SQLite ---
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# --- Logs ---
+*.log
+logs/
