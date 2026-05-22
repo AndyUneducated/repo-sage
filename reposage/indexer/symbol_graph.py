@@ -14,10 +14,14 @@ EdgeKind = Literal["def", "call", "inherit", "import"]
 EDGE_KINDS: tuple[EdgeKind, ...] = ("def", "call", "inherit", "import")
 
 
+SymbolKind = Literal["module", "class", "function", "method", "variable"]
+
+
 @dataclass(slots=True, frozen=True)
 class SymbolNode:
     fqn: str  # fully-qualified name, e.g. `pkg.module.Class.method`
-    kind: Literal["module", "class", "function", "method", "variable"]
+    kind: SymbolKind
+    language: Literal["python", "typescript", "javascript", "go"]
     repo: str
     path: str
     start_line: int

@@ -26,8 +26,8 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
     "httpx>=0.27",
-    "tree-sitter>=0.23",
-    "tree-sitter-languages>=1.10",
+    "tree-sitter>=0.23,<0.26",
+    "tree-sitter-language-pack>=1.6,<2",
     "numpy>=1.26",
     "rank-bm25>=0.2.2",
     "litellm>=1.60",
@@ -98,6 +98,7 @@ ignore = [
 "tests/**/*" = ["PLR2004", "S101"]
 "benchmarks/**/*" = ["PLR2004"]
 "reposage/cli.py" = ["B008", "PLC0415"]
+"reposage/indexer/parser.py" = ["PLC0415"]
 "reposage/observability/otel.py" = ["PLC0415", "PLW0603"]
 
 [tool.ruff.format]
@@ -112,7 +113,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["benchmarks/", "build/", "dist/"]
 
 [[tool.mypy.overrides]]
-module = ["tree_sitter.*", "tree_sitter_languages.*", "leidenalg.*", "igraph.*", "rank_bm25.*"]
+module = ["tree_sitter.*", "tree_sitter_language_pack.*", "leidenalg.*", "igraph.*", "rank_bm25.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

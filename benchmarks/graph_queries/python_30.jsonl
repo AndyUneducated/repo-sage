@@ -1,0 +1,30 @@
+{"id": "q01", "question": "Where is User.login called?", "symbol": "User.login", "expected": ["app.api.routes.login_route", "app.auth.sessions.Session.open"]}
+{"id": "q02", "question": "Who calls User.login in this codebase?", "symbol": "User.login", "expected": ["app.api.routes.login_route", "app.auth.sessions.Session.open"]}
+{"id": "q03", "question": "List callers of User.login.", "symbol": "User.login", "expected": ["app.api.routes.login_route", "app.auth.sessions.Session.open"]}
+{"id": "q04", "question": "Who invokes User.check_password?", "symbol": "User.check_password", "expected": ["app.auth.users.User.login"]}
+{"id": "q05", "question": "Where is AdminUser.has_admin_flag used?", "symbol": "AdminUser.has_admin_flag", "expected": ["app.auth.users.AdminUser.login"]}
+{"id": "q06", "question": "Find every caller of AdminUser.has_admin_flag.", "symbol": "AdminUser.has_admin_flag", "expected": ["app.auth.users.AdminUser.login"]}
+{"id": "q07", "question": "Where is require_auth called?", "symbol": "require_auth", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route", "app.api.routes.login_route"]}
+{"id": "q08", "question": "Who calls api.middleware.require_auth?", "symbol": "api.middleware.require_auth", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route", "app.api.routes.login_route"]}
+{"id": "q09", "question": "Show callers of app.api.middleware.require_auth.", "symbol": "app.api.middleware.require_auth", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route", "app.api.routes.login_route"]}
+{"id": "q10", "question": "List every place we call require_auth(user).", "symbol": "require_auth", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route", "app.api.routes.login_route"]}
+{"id": "q11", "question": "Where is sessions.make_session called?", "symbol": "sessions.make_session", "expected": ["app.api.middleware.require_auth"]}
+{"id": "q12", "question": "Who invokes app.auth.sessions.make_session?", "symbol": "app.auth.sessions.make_session", "expected": ["app.api.middleware.require_auth"]}
+{"id": "q13", "question": "Where is Invoice.issue called?", "symbol": "Invoice.issue", "expected": ["app.api.routes.billing_route", "app.billing.invoices.issue_many"]}
+{"id": "q14", "question": "Find callers of Invoice.issue.", "symbol": "Invoice.issue", "expected": ["app.api.routes.billing_route", "app.billing.invoices.issue_many"]}
+{"id": "q15", "question": "Where is invoices.issue_many called?", "symbol": "invoices.issue_many", "expected": ["app.api.routes.bulk_route"]}
+{"id": "q16", "question": "Who calls app.billing.invoices.issue_many?", "symbol": "app.billing.invoices.issue_many", "expected": ["app.api.routes.bulk_route"]}
+{"id": "q17", "question": "Where is Payment.authorize called?", "symbol": "Payment.authorize", "expected": ["app.billing.payments.charge"]}
+{"id": "q18", "question": "Who calls payments.Payment.authorize?", "symbol": "payments.Payment.authorize", "expected": ["app.billing.payments.charge"]}
+{"id": "q19", "question": "Where is payments.charge called?", "symbol": "payments.charge", "expected": ["app.billing.invoices.Invoice.issue"]}
+{"id": "q20", "question": "List callers of app.billing.payments.charge.", "symbol": "app.billing.payments.charge", "expected": ["app.billing.invoices.Invoice.issue"]}
+{"id": "q21", "question": "Where is db.Connection constructed?", "symbol": "db.Connection", "expected": ["app.utils.db.open_connection"]}
+{"id": "q22", "question": "Who instantiates app.utils.db.Connection?", "symbol": "app.utils.db.Connection", "expected": ["app.utils.db.open_connection"]}
+{"id": "q23", "question": "Where is invoices.Invoice constructed?", "symbol": "invoices.Invoice", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route"]}
+{"id": "q24", "question": "Who calls app.billing.invoices.Invoice (the class)?", "symbol": "app.billing.invoices.Invoice", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route"]}
+{"id": "q25", "question": "Where is billing.payments.CreditCard built?", "symbol": "billing.payments.CreditCard", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route"]}
+{"id": "q26", "question": "List callers of app.billing.payments.CreditCard.", "symbol": "app.billing.payments.CreditCard", "expected": ["app.api.routes.billing_route", "app.api.routes.bulk_route"]}
+{"id": "q27", "question": "Where is utils.logging.log called?", "symbol": "utils.logging.log", "expected": ["app.api.middleware.require_auth", "app.api.routes.create_admin", "app.api.routes.create_user", "app.auth.sessions.Session.close", "app.auth.sessions.Session.open", "app.auth.users.AdminUser.login", "app.auth.users.User.login", "app.billing.invoices.Invoice.issue", "app.billing.payments.CreditCard.authorize", "app.billing.payments.charge", "app.utils.db.Connection.execute", "app.utils.db.Connection.fetch"]}
+{"id": "q28", "question": "Show every caller of app.utils.logging.log.", "symbol": "app.utils.logging.log", "expected": ["app.api.middleware.require_auth", "app.api.routes.create_admin", "app.api.routes.create_user", "app.auth.sessions.Session.close", "app.auth.sessions.Session.open", "app.auth.users.AdminUser.login", "app.auth.users.User.login", "app.billing.invoices.Invoice.issue", "app.billing.payments.CreditCard.authorize", "app.billing.payments.charge", "app.utils.db.Connection.execute", "app.utils.db.Connection.fetch"]}
+{"id": "q29", "question": "Where is users.User.check_password called?", "symbol": "users.User.check_password", "expected": ["app.auth.users.User.login"]}
+{"id": "q30", "question": "Who calls app.auth.users.User.check_password?", "symbol": "app.auth.users.User.check_password", "expected": ["app.auth.users.User.login"]}

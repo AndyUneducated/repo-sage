@@ -45,26 +45,66 @@ docker-compose up --build
 ## 4. Indexing your first repo
 
 ```bash
-python -m reposage.cli index --repo /path/to/your/repo --languages python,typescript
+python -m reposage.cli index --repo /path/to/your/repo
 ```
 
-The first run downloads embedding + reranker weights into `~/.cache/huggingface/`.
+Phase 1 wires up Python end-to-end. Output looks like::
+
+```
+Indexing /path/to/your/repo (langs=python, force=False)
+   Index manifest for repo
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ metric            ┃ value ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ files seen        │  1329 │
+│ python files      │  1321 │
+│ unsupported files │     0 │
+│ parse errors      │     0 │
+│ chunks            │  2592 │
+│ symbols (nodes)   │  3905 │
+│ edges             │ 16307 │
+│ elapsed (s)       │ 0.570 │
+└───────────────────┴───────┘
+```
+
+TypeScript / JavaScript / Go files are *parse-validated only* in Phase 1 and recorded in `file_meta` with `parse_status='unsupported'`. Phase 2 starts pushing chunks to HNSW; later phases add the resolver for the other languages.
 
 ## 5. Asking questions
 
+Phase 1 only serves the deterministic `graph` route — the answering LLM and `/ask` HTTP endpoint land in Phase 2.
+
 ```bash
-python -m reposage.cli ask "where is User.login called?"
-# or hit /ask directly
-curl -s localhost:8000/ask -H 'content-type: application/json' \
-  -d '{"question":"where is User.login called?","top_k":5}' | jq
+# Symbolic graph route (no LLM, no embedder)
+python -m reposage.cli ask "where is User.login called?" --route graph
+```
+
+Sample output::
+
+```
+Q: where is User.login called?
+
+pkg.auth.users.User.login  (pkg/auth/users.py:6)
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ caller                          ┃ path:line               ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ pkg.api.routes.login_route      │ pkg/api/routes.py:22    │
+│ pkg.auth.sessions.Session.open  │ pkg/auth/sessions.py:13 │
+└─────────────────────────────────┴─────────────────────────┘
 ```
 
 ## 6. Running the test suite
 
 ```bash
-make test           # python unit tests
+make test           # python unit + integration tests (incl. graph-bench gate)
 make hnsw-test      # go unit tests with -race
+make bench-graph    # 30-question graph QA benchmark (precision >= 0.90)
 make precommit      # full lint + format check
+```
+
+The 50 kLOC indexing performance check expects you to point at a real Python checkout::
+
+```bash
+REPOSAGE_LARGE_REPO=/path/to/big/python/repo make bench-graph LARGE=1
 ```
 
 ## 7. Troubleshooting

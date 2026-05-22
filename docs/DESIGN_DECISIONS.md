@@ -65,3 +65,23 @@ Each entry records an irreversible-ish choice, the alternatives we rejected, and
 * **Why**: building "all the indexing then all the serving" defers the integration risks. Each phase here is small enough to keep the repo green and big enough to publish a measurable result.
 * **Cost we accept**: some up-front scaffolding cost (Phase 0).
 * **Reversal cost**: n/a — this is process, not architecture.
+
+## DD-009: Phase 1 ships forward-compatible schema and module-aware Python resolver
+
+* **Choice**: even though the roadmap entry for Phase 1 only requires `nodes` + `edges`, the actual implementation also lands `chunks`, `repo_meta`, `file_meta`, and `edges.weight` — and the Python resolver does two-pass module-aware resolution (imports, `self.X`, `cls.X`).
+* **Alternatives**: ship the bare minimum and migrate in Phase 2 / 3 / 7 when each table is needed.
+* **Why**:
+  - Phase 2 will key HNSW vectors on `chunks.chunk_id`; having the table land *now* avoids a schema migration during the hottest implementation phase.
+  - Phase 3 Leiden weights `(src, dst)` edge pairs — `edges.weight` is a column the writer can keep zero-cost up to date today rather than as a deferred migration.
+  - Phase 7 incremental indexing is gated on per-file `file_sha` / `mtime`. Writing those rows now is two extra columns and one extra `UPSERT` per file; the downstream phase becomes a one-line read.
+  - Module-aware resolution is the published water-line for Sourcegraph's `scip-python`. Shipping the simpler "file-local" resolver would have forced us to re-extract Phase 1 outputs once GraphRAG is added.
+* **Cost we accept**: ~25% extra Phase 1 implementation effort (storage + resolver) and an additional unit-test surface to maintain.
+* **Reversal cost**: low. The new tables are independent — dropping them is a single `DROP TABLE`.
+
+## DD-010: TypeScript / JavaScript / Go files are parse-validated, not extracted, in Phase 1
+
+* **Choice**: when the indexer encounters `.ts` / `.tsx` / `.js` / `.jsx` / `.go` files, it parses them with tree-sitter to confirm they're well-formed but writes only one row to `file_meta` with `parse_status='unsupported'`. No `chunks`, `nodes`, or `edges` are produced for them.
+* **Alternatives**: skip them entirely (no `file_meta` row); chunk them now to seed Phase 2 BM25.
+* **Why**: `parse_status` becomes the single source of truth for index coverage. Phase 4's GitHub App can answer "what does this index cover?" in one SQL query, which directly supports user-facing expectation management when we deploy on polyglot OSS repos. Skipping entirely costs that visibility; chunking now would force Phase 3 GraphRAG to handle "chunk without a node" dangling state.
+* **Cost we accept**: Phase 2 hybrid retrieval is Python-only at the start of Phase 2 (TS/Go content is invisible to BM25 + HNSW until their resolvers ship).
+* **Reversal cost**: low. Adding TS / Go resolvers is purely additive — Phase 1 rows for those files have a stable shape.

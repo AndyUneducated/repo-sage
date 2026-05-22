@@ -1,4 +1,4 @@
-.PHONY: help install install-dev fmt lint typecheck test cov dev hnsw-build hnsw-test hnsw-bench bench-qa bench-sift clean precommit docker
+.PHONY: help install install-dev fmt lint typecheck test cov dev hnsw-build hnsw-test hnsw-bench bench-qa bench-sift bench-graph clean precommit docker
 
 PYTHON ?= python3
 UV     ?= uv
@@ -62,6 +62,9 @@ hnsw-bench: ## Run SIFT-1M benchmark
 
 bench-qa: ## Run cross-file QA benchmark (Ragas)
 	$(PYTHON) -m benchmarks.cross_file_qa.run_eval
+
+bench-graph: ## Run Phase 1 graph-query benchmark (precision >= 0.90)
+	$(PYTHON) -m benchmarks.graph_queries.run_eval $(if $(LARGE),--large,)
 
 bench-sift: hnsw-bench ## Alias for hnsw-bench
 

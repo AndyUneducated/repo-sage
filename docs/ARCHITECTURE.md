@@ -31,7 +31,7 @@ This split keeps the online path fast (no model downloads, no parsing) while the
 ## 3. Indexing pipeline
 
 ### 3.1 Parsing
-We use [tree-sitter](https://tree-sitter.github.io/) for incremental, error-resilient parsing across Python, TypeScript, and Go. Language-specific S-expression queries (`reposage/indexer/queries/<lang>.scm`) capture the four edge kinds we care about: definitions, calls, inheritance, imports.
+We use [tree-sitter](https://tree-sitter.github.io/) for incremental, error-resilient parsing. Grammars come from [`tree-sitter-language-pack`](https://github.com/Goldziher/tree-sitter-language-pack), which ships pre-compiled bindings for 100+ languages on a single ABI; this replaced the older `tree-sitter-languages` package (unmaintained since 2024). Phase 1 wires up Python end-to-end. TypeScript / JavaScript / Go grammars are loaded so non-Python files can be *parse-validated*, but their symbol-extraction queries are deferred — every such file lands in `file_meta` with `parse_status='unsupported'` so we always have an honest coverage number.
 
 ### 3.2 Chunking
 Chunks follow AST boundaries (function / method / class / top-level statement) with a max-line cap and small overlap. AST-aware chunking gives noticeably better embeddings on code than fixed-window chunking because semantically coherent units stay together.
@@ -49,7 +49,12 @@ For each parsed file we emit:
 | `inherit` | subclass FQN | superclass FQN | "what extends `BaseAuth`?" |
 | `import` | importing module | imported module FQN | "who imports `payments.client`?" |
 
-Stored as adjacency tables in SQLite with covering indexes on `(dst, kind)` and `(src, kind)`, which is the access pattern of every graph query the router will issue.
+Stored as adjacency tables in SQLite with covering indexes on `(dst, kind)` and `(src, kind)`, which is the access pattern of every graph query the router will issue. The full schema lives in [`docs/INDEX_SCHEMA.md`](INDEX_SCHEMA.md).
+
+Resolution is **two-pass and module-aware** (the `scip-python` v1 water-line):
+
+1. *Pass 1* walks every file to collect definitions and Python `import` bindings into a global FQN table and a per-file local symbol table.
+2. *Pass 2* re-walks edges and resolves `call` / `inherit` / `import` destinations against the local table, with two extra rules: `self.X` and `cls.X` look up methods on the enclosing class, and dotted call paths like `op.exists` are resolved against the import binding for the leftmost component (`op` -> `os.path`). Names we cannot resolve (e.g. calls on local-variable instances) are emitted as `<unresolved:original_name>` so the count is preserved for Phase 3 GraphRAG bucketing.
 
 ### 3.5 GraphRAG community detection
 We run [Leiden](https://www.nature.com/articles/s41598-019-41695-z) on the symbol graph (treating call + inherit + import as edges, weighted), then ask the LLM to summarise each community into 5–8 sentences. Two design choices worth flagging:
