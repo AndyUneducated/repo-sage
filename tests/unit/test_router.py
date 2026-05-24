@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from reposage.retrieval.router import QueryRouter
 
 
@@ -37,7 +36,15 @@ def test_route_sync_returns_graph_for_symbolic() -> None:
     assert decision.confidence == 1.0
 
 
-def test_route_sync_raises_for_non_symbolic() -> None:
+def test_route_sync_falls_back_to_hybrid_for_non_symbolic() -> None:
+    """Phase 2: with no LLM available, the heuristic safety net returns hybrid.
+
+    Phase 1 raised NotImplementedError; Phase 2 makes hybrid the default
+    so the CLI/HTTP path can always serve an answer (DD-013 guards quality
+    via grounding, not by failing the request).
+    """
     r = QueryRouter()
-    with pytest.raises(NotImplementedError):
-        r.route_sync("how does authentication work overall?")
+    decision = r.route_sync("how does authentication work overall?")
+    assert decision.name == "hybrid"
+    assert decision.symbol is None
+    assert 0.0 <= decision.confidence <= 1.0

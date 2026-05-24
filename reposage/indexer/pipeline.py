@@ -18,11 +18,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from reposage.indexer.chunker import Chunker
+from reposage.indexer.chunker import Chunk, Chunker
+from reposage.indexer.embedder import EmbeddingProvider
 from reposage.indexer.extractor import FileExtraction, PythonExtractor, module_fqn_for
 from reposage.indexer.parser import ParseResult, TreeSitterParser
 from reposage.indexer.python_resolver import PythonModuleResolver
 from reposage.storage.chunk_store import ChunkStore
+from reposage.storage.embeddings_store import EmbeddingsStore
 from reposage.storage.sqlite_graph import SQLiteSymbolGraphStore
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,7 @@ class IndexManifest:
     n_unsupported_files: int = 0
     n_parse_errors: int = 0
     n_chunks: int = 0
+    n_embeddings: int = 0
     n_symbols: int = 0
     n_edges: int = 0
     n_communities: int = 0
@@ -81,6 +84,7 @@ class IndexPipeline:
         sqlite_path: Path,
         repo_name: str | None = None,
         max_file_bytes: int = 1_000_000,
+        embedder: EmbeddingProvider | None = None,
     ) -> None:
         self.repo = repo.resolve()
         self.repo_name = repo_name or repo.name
@@ -88,17 +92,25 @@ class IndexPipeline:
         self.parser = TreeSitterParser(max_bytes=max_file_bytes)
         self.chunker = Chunker()
         self.python_extractor = PythonExtractor()
+        # Phase 2: optional. None means "don't write embeddings" — used by
+        # Phase 1 graph-only tests and by the reposage CLI when --no-embed
+        # is passed.
+        self.embedder = embedder
 
     def run(self, force: bool = False) -> IndexManifest:
         t0 = time.monotonic()
         manifest = IndexManifest(repo=self.repo_name)
         graph_store = SQLiteSymbolGraphStore(self.sqlite_path)
         chunk_store = ChunkStore(self.sqlite_path)
+        embeddings_store = EmbeddingsStore(self.sqlite_path)
         try:
             graph_store.init_schema()
             chunk_store.init_schema()
+            embeddings_store.init_schema()
             if force:
                 graph_store.clear_repo(self.repo_name)
+                # Embeddings cascade off chunks via FK; deleting chunks first
+                # also evicts orphaned embedding rows for this repo.
                 chunk_store.clear_repo(self.repo_name)
 
             python_extractions: list[FileExtraction] = []
@@ -109,6 +121,7 @@ class IndexPipeline:
                         path=path,
                         graph_store=graph_store,
                         chunk_store=chunk_store,
+                        embeddings_store=embeddings_store,
                         python_extractions=python_extractions,
                         manifest=manifest,
                         force=force,
@@ -128,6 +141,7 @@ class IndexPipeline:
         finally:
             graph_store.close()
             chunk_store.close()
+            embeddings_store.close()
         manifest.elapsed_seconds = round(time.monotonic() - t0, 3)
         return manifest
 
@@ -162,6 +176,7 @@ class IndexPipeline:
         path: Path,
         graph_store: SQLiteSymbolGraphStore,
         chunk_store: ChunkStore,
+        embeddings_store: EmbeddingsStore,
         python_extractions: list[FileExtraction],
         manifest: IndexManifest,
         force: bool,
@@ -232,9 +247,12 @@ class IndexPipeline:
         chunks = self.chunker.chunk(self.repo_name, parsed_rel)
         if chunks:
             # Drop stale chunks for this file before inserting fresh ones.
+            # Embeddings cascade via the FK we set up in EmbeddingsStore.
             chunk_store.delete_by_path(self.repo_name, rel_path_str)
             chunk_store.upsert(chunks, file_sha=file_sha)
             manifest.n_chunks += len(chunks)
+            if self.embedder is not None:
+                manifest.n_embeddings += self._embed_and_store(chunks, embeddings_store)
 
         module = module_fqn_for(self.repo, path)
         # Pass the rerooted ParseResult so the extractor stamps every RawDef /
@@ -249,6 +267,20 @@ class IndexPipeline:
             file_sha=file_sha,
             mtime=int(stat.st_mtime),
             parse_status="ok",
+        )
+
+    def _embed_and_store(self, chunks: list[Chunk], embeddings_store: EmbeddingsStore) -> int:
+        embedder = self.embedder
+        assert embedder is not None  # guarded by caller
+        vectors = embedder.embed([c.text for c in chunks])
+        if vectors.shape[0] != len(chunks):
+            raise RuntimeError(
+                f"embedder returned {vectors.shape[0]} rows for {len(chunks)} chunks"
+            )
+        return embeddings_store.upsert(
+            ((chunk.chunk_id, vectors[i]) for i, chunk in enumerate(chunks)),
+            model=embedder.model,
+            dim=embedder.dim,
         )
 
     def _rel_path(self, path: Path) -> str:

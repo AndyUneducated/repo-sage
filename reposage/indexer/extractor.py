@@ -103,7 +103,7 @@ def _name_of(node: tree_sitter.Node) -> str | None:
     text = field_node.text
     if text is None:
         return None
-    return str(text.decode("utf-8", errors="replace"))
+    return text.decode("utf-8", errors="replace")
 
 
 def _unwrap_decorated(node: tree_sitter.Node) -> tree_sitter.Node:

@@ -1,21 +1,50 @@
-name: Eval Gate · Cross-File QA
+name: Eval Gate · Cross-File QA + Phase 2 RAG
 
-# Runs the 200-question benchmark against a small evaluator LLM and fails
-# the workflow if accuracy regresses below the recorded baseline. Wired in
-# as a required check from Phase 6 onward; this file gates only the eval
-# job and never the regular Python CI matrix.
+# Two evaluation jobs:
+#
+#   * bench-rag       — Phase 2 hybrid RAG benchmark on the tiny fixture
+#                       with the mock LLM. Always runs on PR; gates merges.
+#   * cross-file-qa   — Phase 4 evaluation harness against a real LLM. Only
+#                       runs on a `run-eval` label or weekly schedule because
+#                       it needs the OPENAI_API_KEY secret.
 
 on:
   pull_request:
     paths:
       - "reposage/**"
-      - "benchmarks/cross_file_qa/**"
+      - "benchmarks/**"
+      - "tests/**"
+      - "proto/**"
+      - "pyproject.toml"
       - ".github/workflows/eval-gate.yml"
   schedule:
     - cron: "0 6 * * 1" # Weekly Monday 06:00 UTC
 
+concurrency:
+  group: eval-gate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  eval:
+  bench-rag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,eval]"
+      - name: Phase 2 RAG benchmark (mock LLM)
+        env:
+          REPOSAGE_RAG_LLM: mock
+        run: |
+          python -m benchmarks.rag.run_eval
+
+  cross-file-qa:
     if: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-eval') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -29,7 +58,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,eval]"
-      - name: Run benchmark (stub)
+      - name: Run benchmark
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

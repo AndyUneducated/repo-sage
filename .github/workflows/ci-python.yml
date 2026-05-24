@@ -7,6 +7,7 @@ on:
       - "reposage/**"
       - "tests/**"
       - "benchmarks/**"
+      - "proto/**"
       - "pyproject.toml"
       - ".github/workflows/ci-python.yml"
   pull_request:
@@ -14,6 +15,7 @@ on:
       - "reposage/**"
       - "tests/**"
       - "benchmarks/**"
+      - "proto/**"
       - "pyproject.toml"
       - ".github/workflows/ci-python.yml"
 
@@ -49,8 +51,12 @@ jobs:
       - name: Type-check (mypy)
         run: mypy reposage
 
-      - name: Test
-        run: pytest --cov=reposage --cov-report=xml -q
+      - name: Test (skip gRPC + Ollama marks; bench-rag runs with mock LLM)
+        env:
+          REPOSAGE_RAG_LLM: mock
+        run: |
+          pytest --cov=reposage --cov-report=xml -q \
+            -m "not requires_go_hnsw and not requires_ollama"
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4

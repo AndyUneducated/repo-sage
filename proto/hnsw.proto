@@ -1,0 +1,59 @@
+// Phase 2 gRPC contract for the in-house HNSW vector store.
+//
+// We deliberately keep this minimal: Add, Search, Stats. BulkLoad is a
+// streaming convenience the Python indexer uses on cold start and after a
+// `force` rebuild. Phase 5 will add Snapshot/Recover; Phase 6 will turn
+// Search into a server-streaming RPC for batched queries.
+syntax = "proto3";
+
+package reposage.hnsw.v1;
+
+option go_package = "github.com/AndyUneducated/repo-sage/go-hnsw/hnswpb";
+
+service HnswService {
+  rpc Add(AddRequest) returns (AddResponse);
+  rpc BulkLoad(stream AddRequest) returns (BulkLoadResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+}
+
+message AddRequest {
+  string id = 1;
+  repeated float vector = 2; // float32 in proto3
+}
+
+message AddResponse {
+  bool ok = 1;
+  uint64 size = 2;
+}
+
+message BulkLoadResponse {
+  uint64 inserted = 1;
+  uint64 size = 2;
+}
+
+message SearchRequest {
+  repeated float vector = 1;
+  uint32 top_k = 2;
+  uint32 ef_search = 3; // 0 → use server default
+}
+
+message SearchHit {
+  string id = 1;
+  float distance = 2;
+}
+
+message SearchResponse {
+  repeated SearchHit hits = 1;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  uint64 size = 1;
+  uint32 dim = 2;
+  string model = 3;
+  uint32 m = 4;
+  uint32 ef_construction = 5;
+  uint32 ef_search = 6;
+}

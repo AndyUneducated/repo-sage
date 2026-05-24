@@ -1,0 +1,20 @@
+{"id": "q01", "question": "How is a session opened in this codebase?", "expected_paths": ["app/auth/sessions.py"]}
+{"id": "q02", "question": "Where is User.login implemented?", "expected_paths": ["app/auth/users.py"]}
+{"id": "q03", "question": "How does the AdminUser login flow differ from regular users?", "expected_paths": ["app/auth/users.py"]}
+{"id": "q04", "question": "Which function constructs a Session from a User?", "expected_paths": ["app/auth/sessions.py"]}
+{"id": "q05", "question": "How does require_auth enforce that the session is active?", "expected_paths": ["app/api/middleware.py"]}
+{"id": "q06", "question": "What does login_route do?", "expected_paths": ["app/api/routes.py"]}
+{"id": "q07", "question": "How does Invoice.issue charge a payment?", "expected_paths": ["app/billing/invoices.py", "app/billing/payments.py"]}
+{"id": "q08", "question": "How does issue_many iterate invoices?", "expected_paths": ["app/billing/invoices.py"]}
+{"id": "q09", "question": "How is a credit card authorized for a charge?", "expected_paths": ["app/billing/payments.py"]}
+{"id": "q10", "question": "Which class represents a payment instrument?", "expected_paths": ["app/billing/payments.py"]}
+{"id": "q11", "question": "How is the global log() helper implemented?", "expected_paths": ["app/utils/logging.py"]}
+{"id": "q12", "question": "How does the database Connection.fetch method work?", "expected_paths": ["app/utils/db.py"]}
+{"id": "q13", "question": "How does open_connection construct a Connection?", "expected_paths": ["app/utils/db.py"]}
+{"id": "q14", "question": "How does the bulk billing route process a list of amounts?", "expected_paths": ["app/api/routes.py", "app/billing/invoices.py"]}
+{"id": "q15", "question": "How does Session.close mark the session inactive?", "expected_paths": ["app/auth/sessions.py"]}
+{"id": "q16", "question": "How is a User instance constructed in this codebase?", "expected_paths": ["app/auth/users.py"]}
+{"id": "q17", "question": "Where is check_password defined?", "expected_paths": ["app/auth/users.py"]}
+{"id": "q18", "question": "Which function checks if a session is currently active before raising?", "expected_paths": ["app/api/middleware.py"]}
+{"id": "q19", "question": "How does charge log a successful authorization?", "expected_paths": ["app/billing/payments.py"]}
+{"id": "q20", "question": "How is create_user implemented in the API layer?", "expected_paths": ["app/api/routes.py"]}

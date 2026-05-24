@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "go-hnsw/**"
+      - "proto/**"
       - ".github/workflows/ci-go.yml"
   pull_request:
     paths:
       - "go-hnsw/**"
+      - "proto/**"
       - ".github/workflows/ci-go.yml"
 
 concurrency:
@@ -41,7 +43,7 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Build
+      - name: Build (server + bench)
         run: |
           mkdir -p bin
           go build -o bin/hnsw-server ./cmd/server
@@ -49,6 +51,14 @@ jobs:
 
       - name: Test (-race)
         run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Smoke-boot the server
+        run: |
+          ./bin/hnsw-server -addr 127.0.0.1:50099 -db /tmp/none.db -dim 4 &
+          PID=$!
+          sleep 1
+          kill $PID
+          wait $PID || true
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4

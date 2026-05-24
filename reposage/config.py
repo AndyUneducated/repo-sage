@@ -23,11 +23,18 @@ class Settings(BaseSettings):
     )
 
     # ---- LLM ----
-    llm_provider: Literal["anthropic", "openai", "azure", "local"] = "anthropic"
+    # Defaults to a local Ollama instance so `reposage ask` works out of the
+    # box without API keys. Hosted providers are still one env edit away
+    # (DD-014).
+    llm_provider: Literal["ollama", "anthropic", "openai", "azure", "local"] = "ollama"
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
-    llm_model: str = "claude-sonnet-4"
-    router_model: str = "gpt-4o-mini"
+    llm_model: str = "ollama_chat/qwen2.5-coder:7b"
+    router_model: str = "ollama_chat/qwen2.5-coder:7b"
+    # LiteLLM picks this up automatically when the model string starts with
+    # `ollama` / `ollama_chat`. We surface it explicitly so it shows up in
+    # `.env.example` and in `Settings` for tests and observability.
+    ollama_api_base: str = "http://localhost:11434"
 
     # ---- Embedding / rerank ----
     embed_model: str = "BAAI/bge-en-v1.5"

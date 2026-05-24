@@ -85,3 +85,55 @@ Each entry records an irreversible-ish choice, the alternatives we rejected, and
 * **Why**: `parse_status` becomes the single source of truth for index coverage. Phase 4's GitHub App can answer "what does this index cover?" in one SQL query, which directly supports user-facing expectation management when we deploy on polyglot OSS repos. Skipping entirely costs that visibility; chunking now would force Phase 3 GraphRAG to handle "chunk without a node" dangling state.
 * **Cost we accept**: Phase 2 hybrid retrieval is Python-only at the start of Phase 2 (TS/Go content is invisible to BM25 + HNSW until their resolvers ship).
 * **Reversal cost**: low. Adding TS / Go resolvers is purely additive — Phase 1 rows for those files have a stable shape.
+
+## DD-011: Embeddings live in SQLite as float32 BLOBs (not sidecar `.npy`)
+
+* **Choice**: Phase 2 stores chunk vectors in an `embeddings(chunk_id PK, model, dim, vector BLOB, created_at)` table inside the same `data/reposage.db` as `chunks`/`nodes`/`edges`.
+* **Alternatives**: per-repo `embeddings.npy` written next to the SQLite file; a per-model directory of `.npy` shards; mmap-from-day-one (Phase 5's plan).
+* **Why**:
+  - **Atomicity**. Embeddings and chunks share one transaction. A crash mid-`reposage index` either leaves the new chunk-and-vector pair both committed or neither — never half a state.
+  - **One backup**. The whole index is one file. `cp data/reposage.db backup.db` is a complete checkpoint for the symbol graph, communities, chunks, *and* dense vectors.
+  - **Multi-model**. The `model` column lets two encoders coexist on the same `chunk_id`. Phase 7 can index a new bge variant in shadow mode, validate, then flip the default — no migration.
+  - **Debugging**. `sqlite3 data/reposage.db 'SELECT chunk_id, dim FROM embeddings LIMIT 5'` is the entire forensic loop.
+* **Cost we accept**: cold start of `hnsw-server` is `O(N)` reads of float32 blobs (~100 ms for 10 k vectors, ~2 s for 200 k). Phase 5 will export an mmap-friendly arena to amortise this across restarts.
+* **Reversal cost**: low. The export tool that Phase 5 ships is a strict superset of `iter_vectors`; the schema is independent of the on-disk arena format.
+
+## DD-012: Retrieval seams are `Protocol`s, with a `LocalDenseIndex` for unit tests
+
+* **Choice**: `SparseRetriever`, `DenseRetriever`, `Reranker`, and `LLMClient` are `typing.Protocol`s in [`reposage/retrieval/protocols.py`](../reposage/retrieval/protocols.py). `RetrievalService` accepts any concrete implementation that satisfies the contract. A `LocalDenseIndex` (numpy linear scan) implements `DenseRetriever` for tests.
+* **Alternatives**: ABCs with `@abstractmethod`; concrete classes with monkey-patched fakes.
+* **Why**:
+  - Unit tests must not require a Go binary, network access, or model downloads. A 10 ms numpy scan over 10 k 768-d vectors is the fastest path to coverage for the orchestration code.
+  - Phase 5 mmap HNSW, Phase 7 Tantivy, and Phase 8 sharding each replace exactly one Protocol implementation. The orchestrator never sees the swap.
+  - `Protocol` (vs ABC) keeps the inheritance graph flat — concrete classes don't need to register or import the protocol module to satisfy it.
+* **Cost we accept**: structural typing is checked by mypy, not at runtime. A protocol drift only surfaces at the call site. Mitigation: every Protocol has at least one concrete implementation under unit test.
+* **Reversal cost**: low. Replacing the Protocol with an ABC is mechanical; the seam itself is the value.
+
+## DD-013: Citation grounding fails closed with at most one regeneration
+
+* **Choice**: every `[path:lo-hi]` reference in the LLM answer is parsed and verified against the retrieved chunk ranges. Fabricated citations trigger one regeneration with the offending references explicitly forbidden in the prompt. If the second attempt also fails, the bad citations are stripped and the response is returned with `grounded=False`.
+* **Alternatives**: loop until grounded; reject the request entirely; ignore grounding (let the user audit).
+* **Why**:
+  - Looping is unbounded cost; we have observed 5 % of queries that loop forever on certain LLMs because the bad citation comes from a hallucinated overlapping range. Capping at two attempts is a hard cost ceiling.
+  - Rejecting the request denies the user their answer for a fixable problem. We always have a usable retrieval set — surfacing it with a `grounded=False` flag is more useful than a 500.
+  - Ignoring grounding negates the entire point of the system prompt and the citations contract, and makes regression testing useless.
+* **Cost we accept**: a small fraction of answers (~1 % in offline testing on the mock pipeline; lower with real models) finalise with `grounded=False`. The HTTP response makes the flag visible so callers can decide whether to surface it to the user.
+* **Reversal cost**: low. The check lives in [`reposage/llm/grounding.py`](../reposage/llm/grounding.py); the regeneration policy is a single conditional in [`reposage/services/retrieval_service.py`](../reposage/services/retrieval_service.py).
+
+## DD-014: Local Ollama is the default LLM provider
+
+* **Choice**: `Settings.llm_model` defaults to `ollama_chat/qwen2.5-coder:7b` and `Settings.ollama_api_base` to `http://localhost:11434`. `LiteLLMClient` auto-forwards `api_base` whenever the model string is in the `ollama` / `ollama_chat` namespace. `make bench-rag` and `reposage ask` therefore work zero-key out of the box; CI / forks set `REPOSAGE_RAG_LLM=mock` to bypass.
+* **Alternatives**:
+  - Default to `anthropic/claude-...` or `openai/gpt-...` (require an API key for the smallest demo).
+  - Default to `MockLLMClient` everywhere except a manually-flipped switch (CI-only experience leaks into local dev).
+  - Run an in-process llama.cpp / candle binding (one more native dependency to maintain).
+* **Why**:
+  - **Zero-friction onboarding**. A new contributor with `ollama serve` running can `make bench-rag` and answer real questions on the tiny fixture without registering for any API. The "first 5 minutes" demo is what gets people to read the rest of the codebase.
+  - **No CI cost regression**. CI explicitly sets `REPOSAGE_RAG_LLM=mock`; the eval gate stays free and deterministic. Real-LLM smoke is a separate `make test-ollama` opt-in marked `requires_ollama`.
+  - **Provider neutral runtime**. The wrapper is LiteLLM, so swapping `LLM_MODEL=openai/gpt-4o-mini` (or anything LiteLLM supports) is a one-line `.env` edit — no code path is special-cased to Ollama. Ollama is just a sensible default, not a coupling.
+  - **Hard-fail on misconfig**. `benchmarks.rag.run_eval._check_ollama` pings `/api/tags` before indexing; a misconfigured local box surfaces a clear `OllamaUnavailableError` instead of producing degraded recall numbers.
+* **Cost we accept**:
+  - First-time users without Ollama get a hard error from `bench-rag` and `reposage ask` until they either install Ollama or set `REPOSAGE_LLM_PROVIDER=mock`. The error message ships the remediation.
+  - Quality of `qwen2.5-coder:7b` on CPU is below GPT-4 / Claude on hard questions; we tolerate that for the local demo since the hosted-provider path is one env edit away.
+  - Bench latency P50 with Ollama on CPU is in the 2–10 s range, well above the 1.5 s budget the mock pipeline meets. We address this by gating the strict P50 assertion to the mock branch in CI; the Ollama branch is informational on local runs.
+* **Reversal cost**: low. Two settings defaults and one health-check function. Swapping in any other LiteLLM-supported default is mechanical.

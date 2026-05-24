@@ -73,17 +73,40 @@ For `graph`-routed questions we never call the embedder. We resolve the named sy
 ### 4.3 Hybrid retrieval
 For semantic questions we run two retrievers in parallel:
 
-* **Dense**: `go-hnsw` with the configured `efSearch`.
+* **Dense**: `go-hnsw` with `M=16, efConstruction=200, efSearch=64` (Malkov & Yashunin 2018 defaults).
 * **Sparse**: BM25 over code tokens (rank-bm25 in Phase 2; Tantivy in Phase 5).
 
-Their ranked lists are fused with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf), which is score-scale invariant. The fused top-K goes through `bge-reranker-v2-m3` for cross-encoder rescoring before being handed to the LLM.
+Both branches return their top-50 candidates, which are fused with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (`k=60`, the original paper's default). RRF is score-scale invariant — we do not need to normalise BM25 scores against cosine similarity. The fused top-20 then goes through `bge-reranker-v2-m3` for cross-encoder rescoring; the resulting top-8 is handed to the LLM.
 
-### 4.4 Citations
-Every chunk we hand to the LLM carries `(repo, path, start_line, end_line)`. The system prompt forbids citing anything that is not present in the context. A post-generation check verifies each cited range exists at HEAD; if it does not, the citation is dropped and the answer is regenerated.
+The Phase 2 plumbing is mediated by four `Protocol`s
+(`SparseRetriever`, `DenseRetriever`, `Reranker`, `LLMClient`) in
+[`reposage/retrieval/protocols.py`](../reposage/retrieval/protocols.py).
+This is the swap point for Phase 5 mmap HNSW, Phase 7 Tantivy, and
+Phase 8 sharding — no caller of `RetrievalService` changes.
+
+### 4.4 Citations and grounding
+Every chunk we hand to the LLM carries `(repo, path, start_line, end_line)`. The system prompt forbids citing anything that is not present in the context. A post-generation `verify_grounding` check (see [`reposage/llm/grounding.py`](../reposage/llm/grounding.py)) parses each `[path:lo-hi]` reference and confirms it is fully contained inside one of the retrieved chunks. If any citation is fabricated we regenerate the answer once with the offending references explicitly forbidden (DD-013); if the second attempt also fails, we strip the bad citations and return the cleaned answer marked `grounded=False`. The two-strikes ceiling is a deliberate cost guard.
+
+### 4.5 The `/ask` contract
+The HTTP and CLI both call into a single `RetrievalService.answer(...)` so they cannot drift. The response carries `route`, `latency_ms`, `grounded`, and a `graph_context` slot reserved for Phase 3 GraphRAG community summaries — Phase 2 always sets it to `null`. See [`docs/plans/phase-2-retrieval.md`](plans/phase-2-retrieval.md) for the full shape.
 
 ## 5. The Go HNSW module
 
-`go-hnsw/` is a separate Go module so it can be consumed independently. It speaks gRPC to the Python service, and a CLI bench harness writes a CSV that we plot in `docs/BENCHMARKS.md`. Persistence uses a CSR adjacency layout in an mmap-friendly arena so we can reload million-scale indexes in milliseconds.
+`go-hnsw/` is a separate Go module so it can be consumed independently.
+
+* **Algorithm**: from-scratch implementation of Malkov & Yashunin (2018)
+  Algorithms 1 (insert) + 5 (search), with a min/max-heap candidate set
+  in `internal/heap/`. Phase 2 is single-threaded; Phase 6 swaps in
+  per-layer `RWMutex`.
+* **Transport**: gRPC service defined in [`proto/hnsw.proto`](../proto/hnsw.proto).
+  The Phase 2 surface is `Add`, `BulkLoad`, `Search`, and `Stats`.
+  `Stats` exposes `(size, dim, model, M, efConstruction, efSearch)` so
+  the Python client can fail fast on mismatch.
+* **Cold start**: at boot the server reads `embeddings WHERE model = ?`
+  out of the SQLite index and `Add`s every row; 34 vectors take ~2 ms,
+  10 k take ~150 ms. Phase 5 will replace this with an mmap'd snapshot.
+* **Bench**: `cmd/bench` writes a CSV row per `(M, efC, ef)` for the SIFT-1M
+  curve we plot in `docs/BENCHMARKS.md` (Phase 5 lands the dataset loader).
 
 ## 6. Observability
 

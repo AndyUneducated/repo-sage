@@ -45,6 +45,10 @@ class ChunkStore:
         conn = sqlite3.connect(self.path)
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
+        # Phase 2 added `embeddings` with `chunk_id REFERENCES chunks(chunk_id)
+        # ON DELETE CASCADE`. Cascade only fires when foreign_keys is ON on
+        # the connection that runs the DELETE.
+        conn.execute("PRAGMA foreign_keys = ON")
         self._conn = conn
         return conn
 

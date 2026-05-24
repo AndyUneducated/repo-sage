@@ -76,6 +76,7 @@ packages = ["reposage"]
 line-length = 100
 target-version = "py312"
 src = ["reposage", "tests", "benchmarks"]
+extend-exclude = ["reposage/proto"]
 
 [tool.ruff.lint]
 select = [
@@ -98,11 +99,14 @@ ignore = [
 "tests/**/*" = ["PLR2004", "S101"]
 "benchmarks/**/*" = ["PLR2004"]
 "reposage/cli.py" = ["B008", "PLC0415"]
+"reposage/api/routes/*.py" = ["B008"]
 "reposage/indexer/parser.py" = ["PLC0415"]
 "reposage/observability/otel.py" = ["PLC0415", "PLW0603"]
+"reposage/proto/*.py" = ["E501", "F401", "I001", "UP", "RUF", "PL"]
 
 [tool.ruff.format]
 docstring-code-format = true
+exclude = ["reposage/proto/*.py", "reposage/proto/*.pyi"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -110,10 +114,22 @@ strict = true
 warn_unreachable = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
-exclude = ["benchmarks/", "build/", "dist/"]
+exclude = ["benchmarks/", "build/", "dist/", "reposage/proto/"]
 
 [[tool.mypy.overrides]]
-module = ["tree_sitter.*", "tree_sitter_language_pack.*", "leidenalg.*", "igraph.*", "rank_bm25.*"]
+module = [
+    "tree_sitter.*",
+    "tree_sitter_language_pack.*",
+    "leidenalg.*",
+    "igraph.*",
+    "rank_bm25.*",
+    "grpc.*",
+    "grpc",
+    "google.*",
+    "litellm.*",
+    "sentence_transformers.*",
+    "reposage.proto.*",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -129,6 +145,7 @@ markers = [
     "slow: long-running integration tests",
     "requires_models: tests that download model weights",
     "requires_go_hnsw: tests that need go-hnsw running locally",
+    "requires_ollama: tests that need a running Ollama daemon",
 ]
 
 [tool.coverage.run]

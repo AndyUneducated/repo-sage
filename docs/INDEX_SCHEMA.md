@@ -77,8 +77,33 @@ CREATE INDEX chunks_repo_path ON chunks(repo, path);
 CREATE INDEX chunks_symbol    ON chunks(symbol);
 ```
 
-Phase 2 adds a separate `embeddings(chunk_id PRIMARY KEY, vector BLOB)`
-table keyed on `chunks.chunk_id` — no migration to `chunks` itself.
+Phase 2 adds a separate `embeddings` table keyed on `chunks.chunk_id` —
+no migration to `chunks` itself.
+
+### `embeddings` — Phase 2 dense vectors
+
+```sql
+CREATE TABLE embeddings(
+  chunk_id   TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+  model      TEXT NOT NULL,         -- e.g. 'BAAI/bge-en-v1.5'
+  dim        INTEGER NOT NULL,      -- usually 768
+  vector     BLOB NOT NULL,         -- little-endian float32 of length dim*4
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX embeddings_model ON embeddings(model);
+```
+
+Vectors are written in the same SQLite transaction as their owning
+chunk (see [`reposage/indexer/pipeline.py`](../reposage/indexer/pipeline.py)),
+so a crash mid-index never produces orphan or split state. `hnsw-server`
+cold-starts by streaming this table and inserting each row into the
+HNSW graph; loads of 10k 768-d vectors take <100 ms locally.
+
+Two embedding sets can coexist for the same `chunk_id` only by writing
+different `model` rows in different generations (Phase 7 model swap).
+Phase 2 always writes a single model per index. The `dim` column is
+explicit so a stale `embed_dim` setting fails loudly at startup rather
+than silently writing truncated vectors.
 
 ### `repo_meta` and `file_meta` — incremental indexing bookkeeping
 

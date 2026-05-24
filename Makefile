@@ -1,4 +1,4 @@
-.PHONY: help install install-dev fmt lint typecheck test cov dev hnsw-build hnsw-test hnsw-bench bench-qa bench-sift bench-graph clean precommit docker
+.PHONY: help install install-dev fmt lint typecheck test test-grpc test-ollama cov dev hnsw-build hnsw-run hnsw-test hnsw-bench bench-qa bench-rag bench-sift bench-graph proto-gen clean precommit docker
 
 PYTHON ?= python3
 UV     ?= uv
@@ -35,8 +35,14 @@ lint: ## Lint Python + Go
 typecheck: ## mypy strict
 	mypy reposage
 
-test: ## Run unit tests
-	pytest -q
+test: ## Run unit + integration tests (skips gRPC + Ollama marks; bench-rag uses mock)
+	REPOSAGE_RAG_LLM=mock pytest -q -m "not requires_go_hnsw and not requires_ollama"
+
+test-grpc: hnsw-build ## Run gRPC integration tests against a live hnsw-server
+	pytest -q -m requires_go_hnsw
+
+test-ollama: ## Run real-LLM smoke tests against a local Ollama daemon
+	pytest -q -m requires_ollama
 
 cov: ## Run tests with coverage
 	pytest --cov=reposage --cov-report=term-missing --cov-report=xml
@@ -52,11 +58,35 @@ precommit: ## Run all pre-commit hooks
 hnsw-build: ## Build go-hnsw server + bench binaries
 	$(MAKE) -C go-hnsw build
 
+hnsw-run: hnsw-build ## Run hnsw-server against the configured SQLite DB
+	./go-hnsw/bin/hnsw-server \
+		-addr 127.0.0.1:50051 \
+		-db ./data/reposage.db \
+		-model BAAI/bge-en-v1.5 \
+		-dim 768 -m 16 -ef-construction 200 -ef-search 64
+
 hnsw-test: ## Run Go unit tests
 	$(MAKE) -C go-hnsw test
 
 hnsw-bench: ## Run SIFT-1M benchmark
 	$(MAKE) -C go-hnsw bench
+
+# ---------- Protobuf ----------
+
+proto-gen: ## Regenerate Python and Go gRPC stubs from proto/*.proto
+	mkdir -p reposage/proto go-hnsw/hnswpb
+	python -m grpc_tools.protoc -Iproto \
+		--python_out=reposage/proto \
+		--grpc_python_out=reposage/proto \
+		--pyi_out=reposage/proto proto/hnsw.proto
+	# protoc emits flat `import hnsw_pb2`; rewrite it as a relative import
+	# so the generated module works under `reposage.proto.*`.
+	sed -i.bak 's|^import hnsw_pb2 as|from . import hnsw_pb2 as|' \
+		reposage/proto/hnsw_pb2_grpc.py && rm -f reposage/proto/hnsw_pb2_grpc.py.bak
+	protoc -Iproto \
+		--go_out=go-hnsw/hnswpb --go_opt=paths=source_relative \
+		--go-grpc_out=go-hnsw/hnswpb --go-grpc_opt=paths=source_relative \
+		proto/hnsw.proto
 
 # ---------- Benchmarks ----------
 
@@ -65,6 +95,9 @@ bench-qa: ## Run cross-file QA benchmark (Ragas)
 
 bench-graph: ## Run Phase 1 graph-query benchmark (precision >= 0.90)
 	$(PYTHON) -m benchmarks.graph_queries.run_eval $(if $(LARGE),--large,)
+
+bench-rag: ## Run Phase 2 hybrid RAG benchmark against Ollama (set REPOSAGE_RAG_LLM=mock to bypass)
+	$(PYTHON) -m benchmarks.rag.run_eval $(if $(LARGE),--large,)
 
 bench-sift: hnsw-bench ## Alias for hnsw-bench
 

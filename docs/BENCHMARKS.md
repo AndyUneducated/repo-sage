@@ -20,7 +20,7 @@ This file is the single source of truth for any number we publish about RepoSage
 * Set: `benchmarks/cross_file_qa/questions.jsonl` (Phase 3 ships 50, Phase 6 the full 200).
 * Repos: documented per row.
 * Metrics: citation grounding (exact), Ragas `answer_correctness`, Ragas `faithfulness`.
-* Model A (router): default `gpt-4o-mini`. Model B (answer): default `claude-sonnet-4`. Model C (judge): held out (e.g. `gpt-4o`).
+* Models (Phase 4 weekly run): A (router) and B (answer) come from `LLM_MODEL`/`ROUTER_MODEL`. The local-default-Ollama setup (DD-014) is for development; the eval-gate weekly cron runs against a hosted A/B pair such as `openai/gpt-4o-mini` (router) and `anthropic/claude-sonnet-4` (answer), with C (judge) held out (e.g. `openai/gpt-4o`).
 
 | Route | Subset (n) | Citation grounding | Ragas correctness | Ragas faithfulness |
 | --- | --- | --- | --- | --- |

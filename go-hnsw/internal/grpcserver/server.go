@@ -1,0 +1,157 @@
+// Package grpcserver hosts the HNSW service: a thin RPC layer over the
+// hnsw.Index from the parent package. It is deliberately a separate package
+// so the production binary can wire in observability without leaking gRPC
+// types into the algorithm core.
+package grpcserver
+
+import (
+	"context"
+	"errors"
+	"sync"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	hnsw "github.com/AndyUneducated/repo-sage/go-hnsw"
+	pb "github.com/AndyUneducated/repo-sage/go-hnsw/hnswpb"
+)
+
+// Server is the gRPC façade. It wraps a single hnsw.Index, plus the model
+// label so clients can confirm they're talking to a server that holds the
+// vectors they expect.
+type Server struct {
+	pb.UnimplementedHnswServiceServer
+
+	mu    sync.Mutex
+	index *hnsw.Index
+	cfg   hnsw.Config
+	model string
+}
+
+// New constructs a server with an empty index. Callers are expected to
+// BulkLoad or Add before calling Search.
+func New(cfg hnsw.Config, model string) (*Server, error) {
+	ix, err := hnsw.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{index: ix, cfg: cfg, model: model}, nil
+}
+
+// Add inserts or replaces a vector under the given id. The server holds a
+// single mutex around the index because Phase 2 ships a single-writer/
+// single-reader index; Phase 6 will shard or use per-layer RWMutex.
+func (s *Server) Add(_ context.Context, req *pb.AddRequest) (*pb.AddResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "nil request")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id required")
+	}
+	vec := req.GetVector()
+	if len(vec) != s.cfg.Dim {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			"vector dim %d != server dim %d", len(vec), s.cfg.Dim,
+		)
+	}
+	s.mu.Lock()
+	err := s.index.Add(req.GetId(), vec)
+	size := uint64(s.index.Len())
+	s.mu.Unlock()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "add: %v", err)
+	}
+	return &pb.AddResponse{Ok: true, Size: size}, nil
+}
+
+// BulkLoad is a streaming Add used by the indexer at startup. We reply with
+// a summary once the client closes the stream so transient errors mid-load
+// abort the whole batch (the client retries).
+func (s *Server) BulkLoad(stream pb.HnswService_BulkLoadServer) error {
+	var inserted uint64
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, errEOF) || isEOF(err) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if req.GetId() == "" {
+			return status.Error(codes.InvalidArgument, "id required")
+		}
+		vec := req.GetVector()
+		if len(vec) != s.cfg.Dim {
+			return status.Errorf(
+				codes.InvalidArgument,
+				"vector dim %d != server dim %d", len(vec), s.cfg.Dim,
+			)
+		}
+		s.mu.Lock()
+		err = s.index.Add(req.GetId(), vec)
+		s.mu.Unlock()
+		if err != nil {
+			return status.Errorf(codes.Internal, "add: %v", err)
+		}
+		inserted++
+	}
+	s.mu.Lock()
+	size := uint64(s.index.Len())
+	s.mu.Unlock()
+	return stream.SendAndClose(&pb.BulkLoadResponse{Inserted: inserted, Size: size})
+}
+
+// Search returns the top-k nearest neighbours.
+func (s *Server) Search(_ context.Context, req *pb.SearchRequest) (*pb.SearchResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "nil request")
+	}
+	if req.GetTopK() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "top_k must be > 0")
+	}
+	vec := req.GetVector()
+	if len(vec) != s.cfg.Dim {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			"vector dim %d != server dim %d", len(vec), s.cfg.Dim,
+		)
+	}
+	s.mu.Lock()
+	hits, err := s.index.Search(vec, int(req.GetTopK()), int(req.GetEfSearch()))
+	s.mu.Unlock()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "search: %v", err)
+	}
+	out := make([]*pb.SearchHit, len(hits))
+	for i, h := range hits {
+		out[i] = &pb.SearchHit{Id: h.ID, Distance: h.Distance}
+	}
+	return &pb.SearchResponse{Hits: out}, nil
+}
+
+// Stats lets clients confirm dim / model agree before issuing inserts.
+func (s *Server) Stats(_ context.Context, _ *pb.StatsRequest) (*pb.StatsResponse, error) {
+	s.mu.Lock()
+	size := uint64(s.index.Len())
+	s.mu.Unlock()
+	return &pb.StatsResponse{
+		Size:           size,
+		Dim:            uint32(s.cfg.Dim),
+		Model:          s.model,
+		M:              uint32(s.cfg.M),
+		EfConstruction: uint32(s.cfg.EfConstruction),
+		EfSearch:       uint32(s.cfg.EfSearch),
+	}, nil
+}
+
+// errEOF is wrapped via stream.Recv() when the client closes the half. We
+// match against it loosely because gRPC-go returns io.EOF directly.
+var errEOF = errors.New("hnsw grpcserver: stream closed")
+
+func isEOF(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err.Error() == "EOF"
+}

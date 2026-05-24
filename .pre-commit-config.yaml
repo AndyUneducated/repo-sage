@@ -11,28 +11,40 @@ repos:
         args: [--maxkb=1024]
       - id: mixed-line-ending
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+  # Drive the project venv's ruff to avoid version skew with `make lint`.
+  # The mirrored ruff at v0.6.9 was stripping `# noqa` codes that newer
+  # ruff (v0.15+, used by `make lint` and CI) still enforces.
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix]
+        name: ruff (project venv)
+        # --force-exclude is required because pre-commit passes explicit
+        # file paths; ruff's `exclude` / `extend-exclude` only filter
+        # explicit args when this flag is set. Without it, generated
+        # files under reposage/proto/ would be re-formatted on commit.
+        entry: ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
       - id: ruff-format
+        name: ruff-format (project venv)
+        entry: ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
+  # Use the project venv's mypy via a local hook. The mirrored mypy
+  # repo runs in pre-commit's isolated env and would need every runtime
+  # dep duplicated under additional_dependencies (litellm, grpcio,
+  # tree-sitter, rank-bm25, sentence-transformers, ...). Driving the
+  # installed mypy is simpler and stays in lockstep with `make typecheck`.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.7
-          - pydantic-settings>=2.4
-          - types-requests
-          - fastapi>=0.115
-          - numpy>=1.26
-          - typer>=0.12
-          - rich>=13.7
-          - uvicorn[standard]>=0.30
-          - opentelemetry-api>=1.27
-          - opentelemetry-sdk>=1.27
-          - opentelemetry-exporter-otlp>=1.27
-        args: [--config-file=pyproject.toml]
+        name: mypy (project venv)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: [--config-file=pyproject.toml, reposage]
         files: ^reposage/
