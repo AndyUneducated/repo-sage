@@ -140,6 +140,15 @@ disallow_untyped_decorators = false
 minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# All async tests share one session-scoped event loop. Tests that touch the
+# real LiteLLMClient hit a global LoggingWorker that binds to the *first*
+# event loop it sees; with per-test loops, the second test would trip the
+# library's "loop changed -> drop queue" path and orphan a logging coroutine
+# (RuntimeWarning: coroutine 'Logging.async_success_handler' was never
+# awaited). Sharing a loop keeps the worker on a single, valid binding for
+# the whole test session.
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"
 addopts = "-ra --strict-markers --strict-config"
 markers = [
     "slow: long-running integration tests",

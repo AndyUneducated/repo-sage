@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import typer
@@ -11,10 +10,13 @@ from rich import print as rprint
 from rich.table import Table
 
 from reposage import __version__
+from reposage.composition import (
+    build_embedder,
+    build_retrieval_service,
+    build_summarizer_llm,
+)
 from reposage.config import get_settings
-from reposage.indexer.embedder import EmbeddingProvider
 from reposage.indexer.pipeline import IndexPipeline
-from reposage.retrieval.protocols import DenseRetriever
 from reposage.retrieval.router import QueryRouter
 from reposage.storage.sqlite_graph import SQLiteSymbolGraphStore
 
@@ -51,19 +53,36 @@ def index(
         "--no-embed",
         help="Skip embedding generation. Useful for graph-only Phase 1 demos.",
     ),
+    graphrag: bool = typer.Option(
+        True,
+        "--graphrag/--no-graphrag",
+        help=(
+            "Run Phase 3 GraphRAG community detection + summarisation after "
+            "the symbol graph is built. Disable with --no-graphrag to keep "
+            "indexing fast (Phase 1/2 behaviour)."
+        ),
+    ),
 ) -> None:
-    """Build symbol graph + chunks + embeddings for a repo."""
+    """Build symbol graph + chunks + embeddings (+ communities) for a repo."""
     settings = get_settings()
     db_path = sqlite_path or settings.sqlite_path
-    embedder = None if no_embed else _build_indexing_embedder()
+    embedder = None if no_embed else build_embedder()
+    summarizer_llm = build_summarizer_llm() if graphrag else None
     pipeline = IndexPipeline(
         repo=repo,
         sqlite_path=db_path,
         repo_name=repo_name,
         embedder=embedder,
+        graphrag=graphrag,
+        summarizer_llm=summarizer_llm,
+        community_resolution=settings.community_resolution,
+        community_max_levels=settings.community_max_levels,
+        community_min_size=settings.community_min_size,
+        community_summary_concurrency=settings.community_summary_concurrency,
     )
     rprint(
-        f"[bold]Indexing[/bold] {repo} (langs={languages}, force={force}, embed={embedder is not None})"
+        f"[bold]Indexing[/bold] {repo} (langs={languages}, force={force}, "
+        f"embed={embedder is not None}, graphrag={graphrag})"
     )
     manifest = pipeline.run(force=force)
 
@@ -78,6 +97,11 @@ def index(
     table.add_row("embeddings", str(manifest.n_embeddings))
     table.add_row("symbols (nodes)", str(manifest.n_symbols))
     table.add_row("edges", str(manifest.n_edges))
+    if graphrag:
+        table.add_row("communities", str(manifest.n_communities))
+        table.add_row("community levels", str(manifest.n_community_levels))
+        table.add_row("community summaries", str(manifest.n_community_summaries))
+        table.add_row("community embeddings", str(manifest.n_community_embeddings))
     table.add_row("elapsed (s)", f"{manifest.elapsed_seconds:.3f}")
     rprint(table)
 
@@ -85,22 +109,6 @@ def index(
         rprint(f"[yellow]{len(manifest.failures)} files failed (showing up to 5):[/yellow]")
         for line in manifest.failures[:5]:
             rprint(f"  [red]{line}[/red]")
-
-
-def _build_indexing_embedder() -> EmbeddingProvider:
-    """Return an embedder instance based on env / settings.
-
-    `REPOSAGE_LLM_PROVIDER=mock` swaps in `HashEmbedder` so smoke tests
-    and CI-without-secrets can index a repo without downloading bge.
-    """
-    flag = os.environ.get("REPOSAGE_LLM_PROVIDER", "").lower()
-    if flag in {"mock", "test", "stub"}:
-        from reposage.indexer.embedder import HashEmbedder
-
-        return HashEmbedder()
-    from reposage.indexer.embedder import BgeEmbedder
-
-    return BgeEmbedder()
 
 
 @app.command()
@@ -159,76 +167,47 @@ async def _run_hybrid_ask(
     route_hint: str,
 ) -> None:
     """Build a `RetrievalService` and run one Q&A turn."""
-    from reposage.api.dependencies import (
-        build_embedder,
-        build_llm,
-        build_reranker,
-    )
-    from reposage.retrieval.bm25 import BM25SparseRetriever
-    from reposage.services.retrieval_service import RetrievalService
-
-    embedder = build_embedder()
-    sparse = BM25SparseRetriever.from_sqlite(sqlite_path, repo=repo)
-    dense = _build_cli_dense(embedder=embedder, sqlite_path=sqlite_path, repo=repo)
-    service = RetrievalService(
-        sqlite_path=sqlite_path,
-        embedder=embedder,
-        dense=dense,
-        sparse=sparse,
-        reranker=build_reranker(),
-        llm=build_llm(),
-    )
-    result = await service.answer(
-        question,
-        repo=repo,
-        route_hint=None if route_hint == "auto" else route_hint,
-        top_k=top_k,
-    )
-
-    rprint(f"[bold]Q:[/bold] {result.question}")
-    rprint(
-        f"[dim]route={result.route}  grounded={result.grounded}  latency={result.latency.total_ms} ms[/dim]\n"
-    )
-    rprint(result.answer)
-    if result.citations:
-        rprint("\n[bold]Citations:[/bold]")
-        for c in result.citations:
-            rprint(f"  - {c.path}:{c.start_line}-{c.end_line}")
-
-
-def _build_cli_dense(
-    *, embedder: EmbeddingProvider, sqlite_path: Path, repo: str | None
-) -> DenseRetriever:
-    """Pick a dense retriever for the CLI.
-
-    If `REPOSAGE_DENSE=local` (default for CI/mock), build a `LocalDenseIndex`
-    from `embeddings` rows in the local SQLite. Otherwise contact the gRPC
-    server. Tests rely on the local path; production uses gRPC.
-    """
-    del repo  # unused for now; reserved for repo-scoped slicing
-    flavour = os.environ.get("REPOSAGE_DENSE", "auto").lower()
-    if flavour == "grpc":
-        from reposage.retrieval.hnsw_client import HnswGrpcClient
-
-        return HnswGrpcClient(
-            expected_model=embedder.model,
-            expected_dim=embedder.dim,
-        )
-    # auto / local: build from sqlite. Falls back trivially if there are
-    # no embeddings (the dense branch then returns nothing and the hybrid
-    # retriever lives off BM25 alone, which is still useful).
-    from reposage.retrieval.local_dense import LocalDenseIndex
-    from reposage.storage.embeddings_store import EmbeddingsStore
-
-    idx = LocalDenseIndex(model=embedder.model, dim=embedder.dim)
-    store = EmbeddingsStore(sqlite_path)
+    service = build_retrieval_service(sqlite_path=sqlite_path, repo=repo)
     try:
-        store.init_schema()
-        for ids, mat in store.iter_vectors(model=embedder.model):
-            idx.add(ids, mat)
+        result = await service.answer(
+            question,
+            repo=repo,
+            route_hint=None if route_hint == "auto" else route_hint,
+            top_k=top_k,
+        )
+
+        rprint(f"[bold]Q:[/bold] {result.question}")
+        if result.outcome.degraded_from:
+            route_display = (
+                f"{result.outcome.route} "
+                f"(degraded from {result.outcome.degraded_from}: "
+                f"{result.outcome.degrade_reason})"
+            )
+        else:
+            route_display = result.outcome.route
+        rprint(
+            f"[dim]route={route_display}  grounded={result.grounded}  "
+            f"latency={result.latency.total_ms} ms[/dim]\n"
+        )
+        rprint(result.answer)
+        if result.citations:
+            rprint("\n[bold]Citations:[/bold]")
+            for c in result.citations:
+                rprint(f"  - {c.path}:{c.start_line}-{c.end_line}")
+        if result.graph_context:
+            rprint("\n[bold]Communities:[/bold]")
+            for item in result.graph_context:
+                title = item.title or "(untitled)"
+                rprint(
+                    f"  - [{item.community_id} L{item.level} score={item.score:.3f}] "
+                    f"[cyan]{title}[/cyan]"
+                )
     finally:
-        store.close()
-    return idx
+        # Drain LiteLLM telemetry while the loop is alive — `asyncio.run`
+        # in the caller would otherwise close the loop with orphaned
+        # `Logging.async_success_handler` coroutines (see
+        # `LiteLLMClient.aclose`).
+        await service.llm.aclose()
 
 
 def _print_callers(*, question: str, symbol: str, sqlite_path: Path) -> None:

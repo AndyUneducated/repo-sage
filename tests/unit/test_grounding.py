@@ -95,3 +95,55 @@ def test_no_citations_at_all_is_not_failure() -> None:
     assert result.valid
     assert result.citations == []
     assert result.dropped_citations == []
+
+
+# ---------- LLM-dialect tolerance (Postel's law) ----------
+#
+# Small local models (qwen2.5-coder:7b et al.) frequently echo the
+# `<retrieved_chunk path="...">` attribute syntax back into their
+# citations. The parser must normalise these variants to the canonical
+# Citation so grounding doesn't reject them as fabricated.
+
+
+def test_extract_xml_attr_form_with_double_quotes() -> None:
+    """`[path="…":lo-hi]` is the most common 7B dialect."""
+    cites = extract_citations('see [path="app/api/middleware.py":8-13] ok')
+    assert cites == [Citation(path="app/api/middleware.py", start_line=8, end_line=13)]
+
+
+def test_extract_xml_attr_form_with_single_quotes() -> None:
+    cites = extract_citations("[path='a/b.py':10-12]")
+    assert cites == [Citation(path="a/b.py", start_line=10, end_line=12)]
+
+
+def test_extract_bare_double_quoted_path() -> None:
+    cites = extract_citations('["a/b.py":10-12]')
+    assert cites == [Citation(path="a/b.py", start_line=10, end_line=12)]
+
+
+def test_extract_backtick_quoted_path() -> None:
+    cites = extract_citations("[`a/b.py`:10-12]")
+    assert cites == [Citation(path="a/b.py", start_line=10, end_line=12)]
+
+
+def test_extract_rejects_mismatched_quotes() -> None:
+    """Opening `"` must close with `"`, not `'`."""
+    assert extract_citations("[path=\"a/b.py':10-12]") == []
+
+
+def test_xml_attr_form_is_grounded_against_canonical_chunk() -> None:
+    """The chunk path is canonical (`a/b.py`); the citation in XML-attr
+    form must still resolve to that path after normalisation."""
+    chunks = [_chunk("app/api/middleware.py", 8, 13)]
+    result = verify_grounding('see [path="app/api/middleware.py":8-13]', chunks)
+    assert result.valid
+    assert result.citations == [Citation(path="app/api/middleware.py", start_line=8, end_line=13)]
+    assert result.dropped_citations == []
+
+
+def test_strip_handles_xml_attr_form() -> None:
+    """A dropped XML-attr citation must still be stripped from the
+    original answer — the literal token has quotes and `path=` in it."""
+    bad = [Citation(path="x.py", start_line=10, end_line=20)]
+    out = strip_bad_citations('see [path="x.py":10-20] there', bad)
+    assert out == "see [citation removed] there"

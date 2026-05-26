@@ -66,3 +66,47 @@ class LLMClient(Protocol):
     def model(self) -> str: ...
 
     async def complete(self, messages: Sequence[ChatMessage]) -> str: ...
+
+    async def aclose(self) -> None:
+        """Drain any provider-side background work before the event loop closes.
+
+        LiteLLM enqueues internal success/failure handlers on a global async
+        queue bound to the *first* event loop it sees. Short-lived loops (e.g.
+        ``asyncio.run(...)`` in CLI / benchmarks / tests) close before that
+        queue drains, leaving orphaned coroutines that trigger
+        ``RuntimeWarning: coroutine was never awaited``. Concrete clients
+        opt-in to a one-shot drain here; in-process mocks are a no-op.
+        """
+        ...
+
+
+@dataclass(slots=True, frozen=True)
+class ScoredCommunity:
+    """One scored community returned by a `CommunityRetriever`."""
+
+    community_id: int
+    level: int
+    title: str | None
+    summary: str | None
+    score: float  # higher is more relevant
+
+
+class CommunityRetriever(Protocol):
+    """Phase 3 GraphRAG community retrieval seam.
+
+    Phase 3 ships `LocalCommunityRetriever` (numpy linear scan over
+    community vectors). Phase 5 can swap in an HNSW-backed implementation
+    by satisfying the same Protocol — `RetrievalService` doesn't care.
+    """
+
+    @property
+    def model(self) -> str: ...
+
+    @property
+    def dim(self) -> int: ...
+
+    async def search(
+        self,
+        query_vector: Sequence[float],
+        top_k: int = 3,
+    ) -> list[ScoredCommunity]: ...

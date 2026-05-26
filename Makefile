@@ -36,7 +36,7 @@ typecheck: ## mypy strict
 	mypy reposage
 
 test: ## Run unit + integration tests (skips gRPC + Ollama marks; bench-rag uses mock)
-	REPOSAGE_RAG_LLM=mock pytest -q -m "not requires_go_hnsw and not requires_ollama"
+	REPOSAGE_PROFILE=mock pytest -q -m "not requires_go_hnsw and not requires_ollama"
 
 test-grpc: hnsw-build ## Run gRPC integration tests against a live hnsw-server
 	pytest -q -m requires_go_hnsw
@@ -90,13 +90,15 @@ proto-gen: ## Regenerate Python and Go gRPC stubs from proto/*.proto
 
 # ---------- Benchmarks ----------
 
-bench-qa: ## Run cross-file QA benchmark (Ragas)
-	$(PYTHON) -m benchmarks.cross_file_qa.run_eval
+bench-qa: ## Run Phase 3 cross-file QA benchmark (community vs hybrid; set REPOSAGE_PROFILE=mock to bypass Ollama)
+	$(PYTHON) -m benchmarks.cross_file_qa.run_eval $(if $(VERBOSE),-v,)
+
+bench-qa-community: bench-qa ## Alias kept for the Phase 3 plan.
 
 bench-graph: ## Run Phase 1 graph-query benchmark (precision >= 0.90)
 	$(PYTHON) -m benchmarks.graph_queries.run_eval $(if $(LARGE),--large,)
 
-bench-rag: ## Run Phase 2 hybrid RAG benchmark against Ollama (set REPOSAGE_RAG_LLM=mock to bypass)
+bench-rag: ## Run Phase 2 hybrid RAG benchmark against Ollama (set REPOSAGE_PROFILE=mock to bypass)
 	$(PYTHON) -m benchmarks.rag.run_eval $(if $(LARGE),--large,)
 
 bench-sift: hnsw-bench ## Alias for hnsw-bench

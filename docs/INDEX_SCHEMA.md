@@ -105,6 +105,61 @@ Phase 2 always writes a single model per index. The `dim` column is
 explicit so a stale `embed_dim` setting fails loudly at startup rather
 than silently writing truncated vectors.
 
+### `communities` / `community_members` / `community_embeddings` — Phase 3 GraphRAG
+
+Three Phase 3 tables hold the Leiden partition and its LLM-generated
+summaries. They sit alongside `nodes` / `edges` / `chunks` in the same
+database; FK relationships are scoped within the GraphRAG tables so
+the rest of the index never has to know they exist (DD-015).
+
+```sql
+CREATE TABLE communities(
+  community_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo           TEXT NOT NULL,
+  level          INTEGER NOT NULL,          -- 0 = leaf (finest), 1+ = rolled-up parent
+  parent_id      INTEGER REFERENCES communities(community_id) ON DELETE SET NULL,
+  member_count   INTEGER NOT NULL,
+  subtree_size   INTEGER NOT NULL,          -- members reachable through descendants
+  content_sha    TEXT NOT NULL,             -- sha256(sorted FQNs + file_shas); summary cache key
+  title          TEXT,                      -- 3-6 word noun-phrase title, e.g. 'Authentication'
+  summary        TEXT,                      -- 2-3 sentences of grounded prose
+  summary_model  TEXT,                      -- writes the model id, e.g. 'ollama_chat/qwen2.5-coder:3b'
+  detected_at    INTEGER NOT NULL,          -- unix seconds, Leiden finish time
+  summarized_at  INTEGER                    -- NULL until the summariser writes a non-placeholder summary
+);
+CREATE INDEX communities_repo_level  ON communities(repo, level);
+CREATE INDEX communities_parent      ON communities(parent_id);
+CREATE INDEX communities_content_sha ON communities(repo, content_sha);
+
+CREATE TABLE community_members(
+  community_id INTEGER NOT NULL REFERENCES communities(community_id) ON DELETE CASCADE,
+  fqn          TEXT NOT NULL,
+  is_seed      INTEGER NOT NULL DEFAULT 0,  -- 1 = representative member used in the Map prompt
+  PRIMARY KEY (community_id, fqn)
+);
+CREATE INDEX community_members_fqn ON community_members(fqn);
+
+CREATE TABLE community_embeddings(
+  community_id INTEGER PRIMARY KEY REFERENCES communities(community_id) ON DELETE CASCADE,
+  model        TEXT NOT NULL,               -- same convention as embeddings.model (DD-011)
+  dim          INTEGER NOT NULL,
+  vector       BLOB NOT NULL,               -- little-endian float32 of length dim*4
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX community_embeddings_model ON community_embeddings(model);
+```
+
+Invariants:
+
+* A row in `community_embeddings` only exists when `communities.summarized_at IS NOT NULL`
+  on the same `community_id` — enforced in `CommunityStore.upsert_embedding`.
+* `content_sha` is the **only** stable identifier across re-indexes;
+  `community_id` is an autoincrement and will drift. Clients should
+  cite communities by `title`, never by id (DD-016).
+* `parent_id` can be `NULL` after re-indexing because the rebuild
+  uses `ON DELETE SET NULL`; the post-build pass re-stitches parent
+  references in a second transaction.
+
 ### `repo_meta` and `file_meta` — incremental indexing bookkeeping
 
 ```sql

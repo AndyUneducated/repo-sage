@@ -5,7 +5,7 @@ What it does:
 1. Index the `tiny_python_repo` fixture into a temp SQLite DB with the
    `HashEmbedder` (deterministic; no model download in CI).
 2. Build a `RetrievalService` from `LocalDenseIndex` + `BM25SparseRetriever`
-   + `MockReranker` + `MockLLMClient`.
+   + `MockReranker` + the configured LLM.
 3. For each question in `python_20.jsonl`, run `service.answer(...)`,
    record latency and citation-legality, and compute file-level recall@5
    over the top retrieved chunks.
@@ -27,7 +27,7 @@ LLM selection (DD-014):
   the configured Ollama endpoint before indexing and fails fast if it
   cannot reach it, so a misconfigured local box never silently degrades
   recall/latency numbers.
-* `REPOSAGE_RAG_LLM=mock`: explicit fallback to `MockLLMClient`. CI and
+* `REPOSAGE_PROFILE=mock`: explicit fallback to `MockLLMClient`. CI and
   the eval-gate workflow set this so a forked PR with no Ollama box
   can still exercise the plumbing.
 """
@@ -35,9 +35,6 @@ LLM selection (DD-014):
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
-import os
 import shutil
 import statistics
 import sys
@@ -45,24 +42,27 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
+from reposage.composition import build_llm, current_profile
 from reposage.config import get_settings
-from reposage.indexer.embedder import HashEmbedder
-from reposage.indexer.pipeline import IndexPipeline
-from reposage.llm.client import LiteLLMClient, MockLLMClient
+from reposage.llm.client import MockLLMClient
 from reposage.llm.grounding import extract_citations
-from reposage.retrieval.bm25 import BM25SparseRetriever
-from reposage.retrieval.local_dense import LocalDenseIndex
 from reposage.retrieval.protocols import LLMClient
-from reposage.retrieval.reranker import MockReranker
-from reposage.services.retrieval_service import RetrievalService
-from reposage.storage.embeddings_store import EmbeddingsStore
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_QUESTIONS = REPO_ROOT / "benchmarks" / "rag" / "python_20.jsonl"
-DEFAULT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "tiny_python_repo"
+from benchmarks._common import (
+    DEFAULT_FIXTURE,
+    OllamaUnavailableError,
+    add_large_arg,
+    add_verbose_arg,
+    check_ollama_available,
+    index_fixture_and_build_service,
+    is_ollama_model,
+    load_questions,
+    resolve_large_repo,
+    run_with_aclose,
+)
+
+DEFAULT_QUESTIONS = Path(__file__).parent / "python_20.jsonl"
 
 
 @dataclass
@@ -88,42 +88,6 @@ class QuestionResult:
         return self.grounded
 
 
-def build_service(db: Path, repo_name: str, llm: LLMClient) -> RetrievalService:
-    embedder = HashEmbedder()
-    sparse = BM25SparseRetriever.from_sqlite(db, repo=repo_name)
-    dense = LocalDenseIndex(model=embedder.model, dim=embedder.dim)
-    es = EmbeddingsStore(db)
-    es.init_schema()
-    for ids, mat in es.iter_vectors(model=embedder.model):
-        dense.add(ids, mat)
-    es.close()
-    return RetrievalService(
-        sqlite_path=db,
-        embedder=embedder,
-        dense=dense,
-        sparse=sparse,
-        reranker=MockReranker(),
-        llm=llm,
-    )
-
-
-def index_repo(repo: Path, db: Path, repo_name: str) -> int:
-    embedder = HashEmbedder()
-    manifest = IndexPipeline(repo=repo, sqlite_path=db, repo_name=repo_name, embedder=embedder).run(
-        force=True
-    )
-    return manifest.n_chunks
-
-
-def load_questions(path: Path) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    with path.open() as fh:
-        for line in fh:
-            if line.strip():
-                out.append(json.loads(line))
-    return out
-
-
 async def run_eval(
     *,
     questions: list[dict[str, object]],
@@ -136,8 +100,13 @@ async def run_eval(
         scratch = Path(tmp) / "repo"
         shutil.copytree(repo, scratch)
         db = Path(tmp) / "index.db"
-        index_repo(scratch, db, repo_name)
-        service = build_service(db, repo_name, llm)
+        service = index_fixture_and_build_service(
+            fixture=scratch,
+            db=db,
+            repo_name=repo_name,
+            llm=llm,
+            graphrag=False,
+        )
 
         results: list[QuestionResult] = []
         for q in questions:
@@ -182,74 +151,20 @@ def summarise(results: list[QuestionResult]) -> dict[str, float]:
     }
 
 
-class OllamaUnavailableError(RuntimeError):
-    """Ollama health check failed; surfaces a clear remediation hint."""
-
-
-_OLLAMA_MODEL_PREFIX = ("ollama/", "ollama_chat/")
-
-
-def _strip_ollama_prefix(model: str) -> str:
-    for p in _OLLAMA_MODEL_PREFIX:
-        if model.startswith(p):
-            return model[len(p) :]
-    return model
-
-
-def _check_ollama(api_base: str, model: str, timeout: float = 2.0) -> None:
-    """Verify Ollama is reachable AND has the requested model pulled.
-
-    A bare /api/tags ping confirms the daemon is up. We then look for the
-    model in the tags list so an unpulled tag fails fast with a clear
-    `ollama pull <name>` hint instead of letting LiteLLM surface an opaque
-    APIConnectionError mid-bench.
-    """
-    bare = _strip_ollama_prefix(model)
-    url = api_base.rstrip("/") + "/api/tags"
-    req = Request(url, method="GET")
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            if resp.status >= 400:
-                raise OllamaUnavailableError(f"GET {url} -> HTTP {resp.status}")
-            payload = json.loads(resp.read().decode("utf-8") or "{}")
-    except (URLError, TimeoutError, OSError) as exc:
-        raise OllamaUnavailableError(
-            f"Cannot reach Ollama at {api_base}: {exc}.\n"
-            f"Either start Ollama (`ollama serve` and `ollama pull "
-            f"{bare}`) or set REPOSAGE_RAG_LLM=mock to fall back to the "
-            "offline mock pipeline."
-        ) from exc
-
-    available = {str(m.get("name", "")) for m in payload.get("models", [])}
-    # Ollama tags include the explicit `:tag` suffix. Treat `name` and
-    # `name:latest` as equivalent so `llama3` matches `llama3:latest`.
-    candidates = {bare} if ":" in bare else {bare, f"{bare}:latest"}
-    if not (candidates & available):
-        pretty = ", ".join(sorted(available)) or "(none)"
-        raise OllamaUnavailableError(
-            f"Ollama is reachable at {api_base} but model {bare!r} is not "
-            f"pulled. Available: {pretty}.\n"
-            f"Run `ollama pull {bare}` or set REPOSAGE_RAG_LLM=mock to use "
-            "the offline mock pipeline."
-        )
-
-
 def make_llm() -> LLMClient:
     """Return the LLM the bench should use.
 
     DD-014: defaults to a real LiteLLM client (Ollama is the configured
-    default provider). The mock branch is reachable only with an
-    explicit env var so a missing Ollama daemon never silently downgrades
-    benchmark numbers.
+    default provider). `REPOSAGE_PROFILE=mock` switches to `MockLLMClient`
+    so a missing Ollama daemon never silently downgrades benchmark
+    numbers. Health-checks the daemon up front when targeting Ollama.
     """
-    flag = os.environ.get("REPOSAGE_RAG_LLM", "").lower()
-    if flag == "mock":
-        return MockLLMClient()
+    if current_profile() == "mock":
+        return build_llm()
     settings = get_settings()
-    model = settings.llm_model
-    if model.startswith(_OLLAMA_MODEL_PREFIX):
-        _check_ollama(settings.ollama_api_base, model)
-    return LiteLLMClient()
+    if is_ollama_model(settings.llm_model):
+        check_ollama_available(settings.llm_model, settings.ollama_api_base)
+    return build_llm()
 
 
 def main() -> int:
@@ -263,7 +178,7 @@ def main() -> int:
         default=None,
         help=(
             "Maximum acceptable median latency. Defaults to 1500ms with "
-            "REPOSAGE_RAG_LLM=mock and 60000ms with a real LLM."
+            "REPOSAGE_PROFILE=mock and 60000ms with a real LLM."
         ),
     )
     parser.add_argument(
@@ -278,26 +193,16 @@ def main() -> int:
         default=None,
         help=(
             "Minimum fraction of grounded answers. Defaults to 1.0 with "
-            "REPOSAGE_RAG_LLM=mock and 0.90 with a real LLM (DD-013)."
+            "REPOSAGE_PROFILE=mock and 0.90 with a real LLM (DD-013)."
         ),
     )
-    parser.add_argument(
-        "--large",
-        action="store_true",
-        help="Run against $REPOSAGE_LARGE_REPO instead of the tiny fixture.",
-    )
-    parser.add_argument("--verbose", "-v", action="store_true")
+    add_large_arg(parser)
+    add_verbose_arg(parser)
     args = parser.parse_args()
 
     if args.large:
-        repo_str = os.environ.get("REPOSAGE_LARGE_REPO", str(REPO_ROOT / ".bench" / "large_repo"))
-        repo = Path(repo_str)
-        if not repo.exists():
-            print(
-                f"large repo not found at {repo}; skipping perf check.\n"
-                "Set REPOSAGE_LARGE_REPO to a >=50 kLOC python checkout to enable.",
-                file=sys.stderr,
-            )
+        repo = resolve_large_repo()
+        if repo is None:
             return 0
         repo_name = "perf"
     else:
@@ -320,14 +225,16 @@ def main() -> int:
         if args.citation_threshold is not None
         else (1.0 if is_mock else 0.90)
     )
-    results = asyncio.run(
-        run_eval(
+
+    results = run_with_aclose(
+        lambda: run_eval(
             questions=questions,
             repo=repo,
             repo_name=repo_name,
             llm=llm,
             top_k=args.top_k,
-        )
+        ),
+        llm,
     )
     summary = summarise(results)
 

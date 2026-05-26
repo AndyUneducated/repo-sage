@@ -37,17 +37,60 @@ class AskRequest(BaseModel):
     route_hint: Literal["auto", "graph", "community", "hybrid"] = "auto"
 
 
-class AskResponse(BaseModel):
-    """Phase 2 answer shape.
+class Outcome(BaseModel):
+    """Which route produced the answer + whether a richer route degraded.
 
-    `graph_context` is reserved for Phase 3 GraphRAG community summaries.
-    Phase 2 always sets it to ``None`` so the contract is forward-stable.
+    Replaces the legacy `route: str` field. `route` is always the
+    terminal route that produced the answer; `degraded_from` is filled
+    only when a richer route (currently just `community`) gave up
+    half-way and the service re-ran on hybrid.
+    """
+
+    route: Literal["graph", "community", "hybrid"]
+    degraded_from: Literal["community"] | None = None
+    degrade_reason: str | None = None
+
+
+class CommunityHit(BaseModel):
+    """One community returned for the GraphRAG community route."""
+
+    community_id: int
+    level: int
+    title: str | None = None
+    summary: str | None = None
+    score: float = 0.0
+
+
+class CommunityContext(BaseModel):
+    """`AskResponse.graph_context` payload for the community route.
+
+    Phase 2 always sets `AskResponse.graph_context` to `None`; Phase 3
+    fills it on the community route. The field stays optional so older
+    clients are unaffected.
+    """
+
+    communities: list[CommunityHit]
+
+
+class AskResponse(BaseModel):
+    """Phase 2 / 3 answer shape.
+
+    `outcome` records the terminal route and any degradation. Earlier
+    schemas used a flat `route: str` (with a concatenated
+    "community-degraded-to-hybrid" string); the structured field makes
+    the degradation machine-readable for dashboards and removes the
+    ambiguity in the enum.
+
+    `graph_context` is `None` on the graph and hybrid routes; on the
+    community route (and on community-degraded-to-hybrid answers) it
+    carries the list of communities that drove the answer so a UI can
+    render the module-level context alongside the file citations.
     """
 
     question: str
     answer: str
     citations: list[Citation]
-    route: str
+    outcome: Outcome
     grounded: bool = True
     latency_ms: LatencyMs = Field(default_factory=LatencyMs)
-    graph_context: object | None = None
+    graph_context: CommunityContext | None = None

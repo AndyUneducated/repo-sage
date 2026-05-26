@@ -5,8 +5,9 @@ The Phase 1 CLI was tested implicitly through the indexing pipeline. Phase
 — each with its own wiring path that the rest of the suite does not cover.
 
 We use Typer's `CliRunner`, point the CLI at a copy of `tiny_python_repo`
-in `tmp_path`, and force `REPOSAGE_LLM_PROVIDER=mock` and
-`REPOSAGE_DENSE=local` so neither network nor Go binary is required.
+in `tmp_path`, and force `REPOSAGE_PROFILE=mock` so neither network nor
+Go binary is required (the mock profile pins both LLM and dense to
+in-process backends).
 """
 
 from __future__ import annotations
@@ -23,12 +24,11 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "tiny_python_r
 
 @pytest.fixture
 def repo_and_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """Copy fixture into tmp and force mock + local-dense env so CLI is offline."""
+    """Copy fixture into tmp and force the mock profile so CLI is offline."""
     repo = tmp_path / "repo"
     shutil.copytree(FIXTURE_ROOT, repo)
     db = tmp_path / "index.db"
-    monkeypatch.setenv("REPOSAGE_LLM_PROVIDER", "mock")
-    monkeypatch.setenv("REPOSAGE_DENSE", "local")
+    monkeypatch.setenv("REPOSAGE_PROFILE", "mock")
     return repo, db
 
 

@@ -24,8 +24,36 @@ from dataclasses import dataclass
 
 from reposage.retrieval.hybrid import RetrievedChunk
 
+# Accept the canonical `[path:lo-hi]` form plus the common LLM dialects:
+#
+#   [path/to/file.py:10-20]            ← canonical
+#   [path="path/to/file.py":10-20]     ← XML-attr style; small open models
+#                                        regularly copy this from the
+#                                        `<retrieved_chunk path="..." ...>`
+#                                        headers we put in the prompt.
+#   [path='path/to/file.py':10-20]     ← same with single quotes
+#   ["path/to/file.py":10-20]          ← quoted path without `path=`
+#   [`path/to/file.py`:10-20]          ← backtick-quoted (markdown reflex)
+#
+# Postel's law: be liberal in what we accept, then normalise to the
+# canonical Citation(path, lo, hi). `verify_grounding` only ever sees
+# the canonical form, so the grounding check stays simple.
 CITATION_RE = re.compile(
-    r"\[(?P<path>[^\s\]:]+(?:/[^\s\]:]+)*)\s*:\s*(?P<lo>\d+)\s*-\s*(?P<hi>\d+)\]"
+    r"""
+    \[
+        \s*
+        (?:path\s*=\s*)?                          # optional `path=` prefix
+        (?P<quote>["'`])?                         # optional opening quote
+        (?P<path>[^\s\]:"'`]+(?:/[^\s\]:"'`]+)*)  # path token(s)
+        (?(quote)(?P=quote))                      # closing quote iff opened
+        \s*:\s*
+        (?P<lo>\d+)
+        \s*-\s*
+        (?P<hi>\d+)
+        \s*
+    \]
+    """,
+    re.VERBOSE,
 )
 
 
@@ -36,17 +64,23 @@ class Citation:
     end_line: int
 
 
+def _parse_match(m: re.Match[str]) -> Citation | None:
+    try:
+        lo = int(m.group("lo"))
+        hi = int(m.group("hi"))
+    except ValueError:
+        return None
+    if lo <= 0 or hi < lo:
+        return None
+    return Citation(path=m.group("path"), start_line=lo, end_line=hi)
+
+
 def extract_citations(text: str) -> list[Citation]:
     out: list[Citation] = []
     for m in CITATION_RE.finditer(text):
-        try:
-            lo = int(m.group("lo"))
-            hi = int(m.group("hi"))
-        except ValueError:
-            continue
-        if lo <= 0 or hi < lo:
-            continue
-        out.append(Citation(path=m.group("path"), start_line=lo, end_line=hi))
+        c = _parse_match(m)
+        if c is not None:
+            out.append(c)
     return out
 
 
@@ -100,13 +134,21 @@ def verify_grounding(answer: str, chunks: Iterable[RetrievedChunk]) -> Grounding
 
 
 def strip_bad_citations(answer: str, dropped: Iterable[Citation]) -> str:
-    """Remove the textual `[path:lo-hi]` for every dropped citation.
+    """Remove the textual citation span for every dropped citation.
 
     Used as a last-resort fallback when both the original and regenerated
-    answers contain bad citations.
+    answers contain bad citations. The span is whatever ``CITATION_RE``
+    matched — that way the canonical ``[path:lo-hi]`` form *and* the
+    quoted / `path="..."` dialects all get stripped cleanly.
     """
-    out = answer
-    for c in dropped:
-        marker = f"[{c.path}:{c.start_line}-{c.end_line}]"
-        out = out.replace(marker, "[citation removed]")
-    return out
+    bad = {(c.path, c.start_line, c.end_line) for c in dropped}
+    if not bad:
+        return answer
+
+    def _replace(m: re.Match[str]) -> str:
+        c = _parse_match(m)
+        if c is not None and (c.path, c.start_line, c.end_line) in bad:
+            return "[citation removed]"
+        return m.group(0)
+
+    return CITATION_RE.sub(_replace, answer)

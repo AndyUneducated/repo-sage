@@ -53,7 +53,7 @@ jobs:
 
       - name: Test (skip gRPC + Ollama marks; bench-rag runs with mock LLM)
         env:
-          REPOSAGE_RAG_LLM: mock
+          REPOSAGE_PROFILE: mock
         run: |
           pytest --cov=reposage --cov-report=xml -q \
             -m "not requires_go_hnsw and not requires_ollama"

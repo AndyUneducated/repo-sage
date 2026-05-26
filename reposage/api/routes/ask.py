@@ -5,7 +5,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from reposage.api.dependencies import get_retrieval_service
-from reposage.api.schemas import AskRequest, AskResponse, Citation, LatencyMs
+from reposage.api.schemas import (
+    AskRequest,
+    AskResponse,
+    Citation,
+    CommunityContext,
+    CommunityHit,
+    LatencyMs,
+    Outcome,
+)
 from reposage.services.retrieval_service import RetrievalService
 
 router = APIRouter(prefix="/ask", tags=["qa"])
@@ -26,6 +34,23 @@ async def ask(
     except RuntimeError as exc:  # e.g. dim/model mismatch on first connect
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    # Phase 3: translate the service-layer `list[CommunityContextItem]`
+    # into the HTTP schema. ``None`` on routes other than ``community``.
+    graph_context: CommunityContext | None = None
+    if result.graph_context:
+        graph_context = CommunityContext(
+            communities=[
+                CommunityHit(
+                    community_id=item.community_id,
+                    level=item.level,
+                    title=item.title,
+                    summary=item.summary,
+                    score=item.score,
+                )
+                for item in result.graph_context
+            ]
+        )
+
     return AskResponse(
         question=result.question,
         answer=result.answer,
@@ -37,7 +62,11 @@ async def ask(
             )
             for c in result.citations
         ],
-        route=result.route,
+        outcome=Outcome(
+            route=result.outcome.route,
+            degraded_from=result.outcome.degraded_from,
+            degrade_reason=result.outcome.degrade_reason,
+        ),
         grounded=result.grounded,
         latency_ms=LatencyMs(
             embed_ms=result.latency.embed_ms,
@@ -46,5 +75,5 @@ async def ask(
             llm_ms=result.latency.llm_ms,
             total_ms=result.latency.total_ms,
         ),
-        graph_context=None,
+        graph_context=graph_context,
     )

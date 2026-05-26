@@ -156,19 +156,20 @@ CREATE INDEX IF NOT EXISTS embeddings_model ON embeddings(model);
 ### 本地一键端到端（默认 mock LLM，无需密钥）
 
 ```bash
-REPOSAGE_LLM_PROVIDER=mock \
+REPOSAGE_PROFILE=mock \
   python -m reposage.cli index --repo tests/fixtures/tiny_python_repo --force
 
-REPOSAGE_LLM_PROVIDER=mock \
+REPOSAGE_PROFILE=mock \
   python -m reposage.cli ask "How is the session opened against User.login?" --route hybrid
 ```
 
 ### 用真实 bge + LiteLLM
 
 ```bash
-python -m reposage.cli index --repo path/to/your/repo --force
+REPOSAGE_PROFILE=local \
+  python -m reposage.cli index --repo path/to/your/repo --force
 make hnsw-run            # 终端 1
-REPOSAGE_DENSE=grpc \
+REPOSAGE_PROFILE=production \
   python -m reposage.cli ask "How is the session timeout configured?" --route hybrid
 ```
 

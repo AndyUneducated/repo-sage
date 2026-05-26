@@ -12,6 +12,8 @@ demonstrate the citation-grounding fallback works.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import re
 from collections.abc import Sequence
 
@@ -79,6 +81,49 @@ class LiteLLMClient:
             content = message.get("content", "")
         return str(content or "")
 
+    async def aclose(self) -> None:
+        """Shut LiteLLM's global logging worker down before the loop closes.
+
+        LiteLLM's ``GLOBAL_LOGGING_WORKER`` is a process-wide singleton that
+        binds to the *first* event loop that touches it. It owns two kinds
+        of background work:
+
+        1. Per-call telemetry coroutines (``Logging.async_success_handler``)
+           sitting in an ``asyncio.Queue``.
+        2. A long-lived ``_worker_loop`` task that drains the queue.
+
+        Short-lived loops (``asyncio.run`` in CLI / benchmarks / tests) close
+        before either is cleaned up. Python then emits
+        ``RuntimeWarning: coroutine '…' was never awaited`` and ``Task was
+        destroyed but it is pending`` for the orphaned worker. Calling
+        ``flush()`` only handles (1); ``stop()`` handles (2) by cancelling
+        the worker task whose ``CancelledError`` branch then drains the
+        remaining queue via ``clear_queue``. Doing both, in this order, is
+        what makes pytest runs warning-free across a loop swap.
+
+        Best-effort: any failure here is swallowed because telemetry must
+        never fail a Q&A turn.
+        """
+        try:
+            from litellm.litellm_core_utils.logging_worker import (  # noqa: PLC0415
+                GLOBAL_LOGGING_WORKER,
+            )
+        except ImportError:
+            return
+
+        # Cap each step at 2s so a wedged LiteLLM internal doesn't hang the
+        # process. Telemetry is non-critical; a timeout here just means a
+        # stray warning, never a stuck shutdown.
+        flush = getattr(GLOBAL_LOGGING_WORKER, "flush", None)
+        if flush is not None:
+            with contextlib.suppress(TimeoutError, Exception):
+                await asyncio.wait_for(flush(), timeout=2.0)
+
+        stop = getattr(GLOBAL_LOGGING_WORKER, "stop", None)
+        if stop is not None:
+            with contextlib.suppress(TimeoutError, Exception):
+                await asyncio.wait_for(stop(), timeout=2.0)
+
 
 class MockLLMClient:
     """Deterministic LLM stand-in.
@@ -112,6 +157,10 @@ class MockLLMClient:
         lo = m.group("lo")
         hi = m.group("hi")
         return f"Based on the retrieved code, the relevant logic lives in [{path}:{lo}-{hi}]."
+
+    async def aclose(self) -> None:
+        """No-op: the mock client holds no background state."""
+        return
 
 
 # Backwards-compatible alias for the Phase 1 stub.

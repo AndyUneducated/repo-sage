@@ -24,7 +24,7 @@ cp .env.example .env       # defaults to local Ollama; edit only if you need a h
 make install-dev           # python deps + pre-commit
 make hnsw-build            # builds bin/hnsw-server and bin/hnsw-bench
 
-# Pull the default LLM (skip if you'll only ever run REPOSAGE_LLM_PROVIDER=mock)
+# Pull the default LLM (skip if you'll only ever run REPOSAGE_PROFILE=mock)
 ollama pull qwen2.5-coder:7b
 ```
 
@@ -50,22 +50,25 @@ Or one terminal with docker:
 docker-compose up --build
 ```
 
-### LLM provider ladder (DD-014)
+### Profile ladder (DD-024)
 
-Three rungs, lowest cost first:
+`REPOSAGE_PROFILE` chooses the *entire* retrieval stack — embedder,
+reranker, dense backend, LLM — in one shot. Three rungs, lowest cost
+first:
 
-| Mode | How to enable | When to use |
+| Profile | Backends | When to use |
 | --- | --- | --- |
-| **mock** (offline) | `REPOSAGE_LLM_PROVIDER=mock` | Iterating on plumbing without burning tokens; CI without secrets. Uses `HashEmbedder` + `MockLLMClient` + `MockReranker`; deterministic. |
-| **ollama** (default, local) | `ollama serve` + `ollama pull qwen2.5-coder:7b` | Local development; full `/ask` quality without an API key. The `LLM_MODEL=ollama_chat/<name>` setting + `OLLAMA_API_BASE` in `.env` are wired by default. |
-| **hosted** (OpenAI / Anthropic) | Set `LLM_MODEL=openai/gpt-4o-mini` (or `anthropic/...`) **and** the matching API key in `.env` | Production-grade quality runs and the weekly `eval-gate` workflow. |
+| **mock** (default, offline) | `HashEmbedder` + `MockReranker` + `MockLLMClient` + `LocalDenseIndex` | First run, plumbing iteration, CI without secrets. Deterministic. |
+| **local** | `BgeEmbedder` + `CrossEncoderReranker` + `LiteLLMClient` (Ollama by default) + `LocalDenseIndex` | Day-to-day dev with real quality; no Go binary or hosted key required. Needs `ollama serve` + `ollama pull qwen2.5-coder:7b`. |
+| **production** | `BgeEmbedder` + `CrossEncoderReranker` + `LiteLLMClient` (configured provider) + `HnswGrpcClient` | Real deployments / weekly `eval-gate`. Talks to `make hnsw-run` for dense; usually paired with a hosted `LLM_MODEL`. |
 
-The runtime is provider-agnostic via LiteLLM, so there is no code to
-change when you switch — only `.env`.
+The LLM string (`LLM_MODEL=ollama_chat/...` vs
+`anthropic/claude-3-5-sonnet-latest`) and provider creds still come from
+`.env`; LiteLLM picks the provider from the model prefix. The profile
+just decides "mock everything" vs "use whatever `.env` says".
 
-`make bench-rag` defaults to whatever `LLM_MODEL` points at and pings
-Ollama up front; pass `REPOSAGE_RAG_LLM=mock` to bypass for a quick
-plumbing check.
+`make bench-rag` reads the active profile, pings Ollama up front when
+applicable, and falls back cleanly under `REPOSAGE_PROFILE=mock`.
 
 ## 4. Indexing your first repo
 
@@ -109,9 +112,10 @@ python -m reposage.cli ask "how is the session timeout configured?" --route hybr
 python -m reposage.cli ask "explain authentication" --route auto
 ```
 
-The CLI defaults to a `LocalDenseIndex` built from the local SQLite
-embeddings (no Go binary required). To talk to `hnsw-run` instead, set
-`REPOSAGE_DENSE=grpc`.
+Under `REPOSAGE_PROFILE=mock` (default) and `REPOSAGE_PROFILE=local`
+the CLI builds a `LocalDenseIndex` directly from the SQLite embeddings
+table — no Go binary required. Switch to `REPOSAGE_PROFILE=production`
+to talk to `make hnsw-run` over gRPC.
 
 Sample output::
 
@@ -136,7 +140,7 @@ make test-ollama    # real-LLM smoke test against your local Ollama (`ollama ser
 make hnsw-test      # go unit tests with -race
 make bench-graph    # 30-question graph QA benchmark (precision >= 0.90)
 make bench-rag      # 20-question hybrid RAG benchmark — uses your configured LLM (Ollama by default)
-REPOSAGE_RAG_LLM=mock make bench-rag    # offline mode; useful in CI / forks without Ollama
+REPOSAGE_PROFILE=mock make bench-rag    # offline mode; useful in CI / forks without Ollama
 make precommit      # full lint + format check
 ```
 

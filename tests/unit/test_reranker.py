@@ -3,7 +3,7 @@
 Two implementations live behind the `Reranker` protocol:
 
 * `MockReranker`: deterministic lexical-overlap scorer used by tests and
-  the offline ``REPOSAGE_LLM_PROVIDER=mock`` mode. Cheap and dependency-free.
+  the offline ``REPOSAGE_PROFILE=mock`` mode. Cheap and dependency-free.
 * `CrossEncoderReranker`: production wrapper around a sentence-transformers
   `CrossEncoder`. We do not download the 350 MB model in CI, so this test
   monkeypatches the import to a stub that returns scripted scores.

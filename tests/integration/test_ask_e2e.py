@@ -139,7 +139,8 @@ def test_post_ask_endpoint(indexed: tuple[Path, Path]) -> None:
             )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["route"] in {"hybrid", "graph"}
+        assert body["outcome"]["route"] in {"hybrid", "graph"}
+        assert body["outcome"]["degraded_from"] is None
         assert body["graph_context"] is None  # Phase 3 will populate
         assert "latency_ms" in body
         assert body["latency_ms"]["total_ms"] >= 0

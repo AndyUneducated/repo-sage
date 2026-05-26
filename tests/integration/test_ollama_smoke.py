@@ -102,21 +102,27 @@ async def test_real_ollama_answers_with_grounded_or_stripped_citation(
         dense.add(ids, mat)
     es.close()
 
+    # LiteLLMClient picks model + api_base from settings.
+    llm = LiteLLMClient()
     service = RetrievalService(
         sqlite_path=db,
         embedder=embedder,
         dense=dense,
         sparse=sparse,
         reranker=MockReranker(),
-        # LiteLLMClient picks model + api_base from settings.
-        llm=LiteLLMClient(),
+        llm=llm,
     )
-    result = await service.answer(
-        "How does Session.open work?",
-        repo="tiny",
-        route_hint="hybrid",
-        top_k=4,
-    )
+    try:
+        result = await service.answer(
+            "How does Session.open work?",
+            repo="tiny",
+            route_hint="hybrid",
+            top_k=4,
+        )
+    finally:
+        # Drain LiteLLM's logging queue before the loop dies — see
+        # `LiteLLMClient.aclose` for context on the orphaned-coroutine warning.
+        await llm.aclose()
     assert result.answer.strip(), "Ollama returned an empty answer"
     # Bound the round-trip so a wedged daemon doesn't hang CI for hours.
     # qwen2.5-coder:7b on CPU sits around 2-15s per call; we leave a wide

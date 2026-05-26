@@ -3,7 +3,8 @@
 Stages (deliberately linear; parallelism added per-stage in later phases):
 
     walk repo  ->  parse  ->  chunk  ->  graph extract / resolve
-                                        └─> community detect (Phase 3)
+                                        └─> community detect / summarise
+                                            / embed (Phase 3)
 
 Stage failures degrade gracefully: a parse error on one file should not abort
 the run. Errors are logged and surfaced in the final index manifest.
@@ -11,6 +12,7 @@ the run. Errors are logged and surfaced in the final index manifest.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -18,12 +20,19 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from reposage.indexer.chunker import Chunk, Chunker
 from reposage.indexer.embedder import EmbeddingProvider
 from reposage.indexer.extractor import FileExtraction, PythonExtractor, module_fqn_for
+from reposage.indexer.graphrag.community import Community, CommunityDetector
+from reposage.indexer.graphrag.seed import fqns_only, pick_seed_members
+from reposage.indexer.graphrag.summarizer import CommunitySummarizer
 from reposage.indexer.parser import ParseResult, TreeSitterParser
 from reposage.indexer.python_resolver import PythonModuleResolver
+from reposage.retrieval.protocols import LLMClient
 from reposage.storage.chunk_store import ChunkStore
+from reposage.storage.community_store import CommunityStore
 from reposage.storage.embeddings_store import EmbeddingsStore
 from reposage.storage.sqlite_graph import SQLiteSymbolGraphStore
 
@@ -67,6 +76,9 @@ class IndexManifest:
     n_symbols: int = 0
     n_edges: int = 0
     n_communities: int = 0
+    n_community_levels: int = 0
+    n_community_summaries: int = 0
+    n_community_embeddings: int = 0
     elapsed_seconds: float = 0.0
     failures: list[str] = field(default_factory=list)
 
@@ -85,6 +97,18 @@ class IndexPipeline:
         repo_name: str | None = None,
         max_file_bytes: int = 1_000_000,
         embedder: EmbeddingProvider | None = None,
+        *,
+        # Phase 3 GraphRAG: when both are provided, detect communities and
+        # summarise them via the LLM. `summarizer_llm` is optional even
+        # when graphrag=True — passing None still runs Leiden and writes
+        # the partition but skips the summary step. That keeps the
+        # `--no-embed` / mock-mode story coherent.
+        graphrag: bool = False,
+        summarizer_llm: LLMClient | None = None,
+        community_resolution: float = 1.0,
+        community_max_levels: int = 3,
+        community_min_size: int = 3,
+        community_summary_concurrency: int = 4,
     ) -> None:
         self.repo = repo.resolve()
         self.repo_name = repo_name or repo.name
@@ -96,6 +120,13 @@ class IndexPipeline:
         # Phase 1 graph-only tests and by the reposage CLI when --no-embed
         # is passed.
         self.embedder = embedder
+        # Phase 3 GraphRAG knobs.
+        self.graphrag = graphrag
+        self.summarizer_llm = summarizer_llm
+        self.community_resolution = community_resolution
+        self.community_max_levels = community_max_levels
+        self.community_min_size = community_min_size
+        self.community_summary_concurrency = community_summary_concurrency
 
     def run(self, force: bool = False) -> IndexManifest:
         t0 = time.monotonic()
@@ -103,10 +134,19 @@ class IndexPipeline:
         graph_store = SQLiteSymbolGraphStore(self.sqlite_path)
         chunk_store = ChunkStore(self.sqlite_path)
         embeddings_store = EmbeddingsStore(self.sqlite_path)
+        # Always initialise the community schema, even with ``graphrag=False``.
+        # Downstream consumers (CLI, API, tests) treat the DB schema as a
+        # stable contract; making the tables conditional on a feature
+        # flag leaks the flag into every read path.
+        community_store_init = CommunityStore(self.sqlite_path)
         try:
             graph_store.init_schema()
             chunk_store.init_schema()
             embeddings_store.init_schema()
+            community_store_init.init_schema()
+        finally:
+            community_store_init.close()
+        try:
             if force:
                 graph_store.clear_repo(self.repo_name)
                 # Embeddings cascade off chunks via FK; deleting chunks first
@@ -138,12 +178,129 @@ class IndexPipeline:
                 manifest.n_edges += graph_store.upsert_edges(graph.edges)
 
             graph_store.upsert_repo_meta(repo=self.repo_name)
+
+            # Phase 3 — community detection + summarisation + embedding.
+            # We run this *after* the symbol graph is fully populated for
+            # the repo so Leiden sees every edge.
+            if self.graphrag and manifest.n_symbols > 0:
+                community_store = CommunityStore(self.sqlite_path)
+                try:
+                    self._run_graphrag(
+                        graph_store=graph_store,
+                        chunk_store=chunk_store,
+                        community_store=community_store,
+                        manifest=manifest,
+                    )
+                finally:
+                    community_store.close()
         finally:
             graph_store.close()
             chunk_store.close()
             embeddings_store.close()
         manifest.elapsed_seconds = round(time.monotonic() - t0, 3)
         return manifest
+
+    # ------------------------------------------------- Phase 3 GraphRAG
+
+    def _run_graphrag(
+        self,
+        *,
+        graph_store: SQLiteSymbolGraphStore,
+        chunk_store: ChunkStore,
+        community_store: CommunityStore,
+        manifest: IndexManifest,
+    ) -> None:
+        """Detect communities, summarise, embed. Mutates `manifest`."""
+        # Schema is already initialised by `run()` so downstream consumers
+        # see the community tables regardless of the ``graphrag`` flag.
+
+        # Snapshot the previous partition keyed by content_sha so the
+        # summariser can skip unchanged communities on re-index.
+        existing: dict[str, Community] = {
+            c.content_sha: c for c in community_store.iter_for_repo(self.repo_name) if c.content_sha
+        }
+        community_store.clear_repo(self.repo_name)
+
+        detector = CommunityDetector(
+            resolution=self.community_resolution,
+            max_levels=self.community_max_levels,
+            min_size=self.community_min_size,
+        )
+        try:
+            detected, stats = detector.detect(graph_store, repo=self.repo_name)
+        except Exception as exc:
+            manifest.failures.append(f"<community-detect>: {exc!r}")
+            logger.exception("community detection failed for %s", self.repo_name)
+            return
+
+        if not detected:
+            return
+
+        manifest.n_communities += stats.n_communities
+        manifest.n_community_levels = max(manifest.n_community_levels, stats.n_levels)
+
+        # Summarise if an LLM is provided; otherwise persist the
+        # partition unsummarised so later runs (or operators) can fill
+        # the summary in.
+        summarised: list[Community] = detected
+        if self.summarizer_llm is not None:
+            summariser = CommunitySummarizer(
+                self.summarizer_llm,
+                concurrency=self.community_summary_concurrency,
+            )
+            try:
+                summarised = asyncio.run(
+                    summariser.summarize_all(
+                        detected,
+                        conn=chunk_store._connect(),
+                        existing=existing,
+                    )
+                )
+            except Exception as exc:
+                manifest.failures.append(f"<community-summary>: {exc!r}")
+                logger.exception("community summarisation failed")
+                summarised = detected
+
+        # Persist communities (+members). The returned mapping tells us
+        # the autoincrement community_id we can attach embeddings to.
+        local_to_db = community_store.upsert(
+            summarised, repo=self.repo_name, replace_existing=False
+        )
+        manifest.n_community_summaries = sum(
+            1 for c in summarised if c.summary and c.summary != "<auto-summary unavailable>"
+        )
+
+        # Mark seeds on `community_members` so downstream queries (e.g.
+        # `_answer_community`) can pull representative chunks without
+        # recomputing the heuristic.
+        chunk_conn = chunk_store._connect()
+        for c in summarised:
+            if c.level != 0:
+                continue
+            seeds = pick_seed_members(c, conn=chunk_conn, max_seeds=12)
+            db_id = local_to_db.get(c.id)
+            if db_id is None or not seeds:
+                continue
+            community_store.mark_seeds(db_id, fqns_only(seeds))
+
+        # Embed the summaries so the community route has a vector index.
+        if self.embedder is not None:
+            with_summary = [
+                c for c in summarised if c.summary and c.summary != "<auto-summary unavailable>"
+            ]
+            if with_summary:
+                vectors = self.embedder.embed([c.summary or "" for c in with_summary])
+                for c, vec in zip(with_summary, vectors, strict=True):
+                    db_id = local_to_db.get(c.id)
+                    if db_id is None:
+                        continue
+                    community_store.upsert_embedding(
+                        db_id,
+                        np.asarray(vec, dtype=np.float32),
+                        model=self.embedder.model,
+                        dim=self.embedder.dim,
+                    )
+                manifest.n_community_embeddings += len(with_summary)
 
     # ------------------------------------------------------------------ helpers
 

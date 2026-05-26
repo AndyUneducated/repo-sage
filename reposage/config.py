@@ -31,10 +31,26 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     llm_model: str = "ollama_chat/qwen2.5-coder:7b"
     router_model: str = "ollama_chat/qwen2.5-coder:7b"
+    # Smaller default — community summaries are batched, so the cost of the
+    # 7B answering model is prohibitive on CPU. Falls back to llm_model when
+    # the 3B variant is not pulled (`make bench-qa` documents the pull).
+    summarizer_model: str = "ollama_chat/qwen2.5-coder:3b"
     # LiteLLM picks this up automatically when the model string starts with
     # `ollama` / `ollama_chat`. We surface it explicitly so it shows up in
     # `.env.example` and in `Settings` for tests and observability.
     ollama_api_base: str = "http://localhost:11434"
+
+    # ---- GraphRAG (Phase 3) ----
+    # `community_resolution` tunes Leiden's `RBConfigurationVertexPartition`:
+    # higher → more / smaller communities. 1.0 is the canonical default.
+    community_resolution: float = 1.0
+    community_max_levels: int = 3
+    # Communities smaller than this are merged back into their parent during
+    # detection. Avoids one-node "noise" communities for orphan symbols.
+    community_min_size: int = 3
+    # Bounded concurrency for the summarizer's Map/Reduce LLM calls. 4 keeps
+    # local Ollama from queueing while still amortising network round-trips.
+    community_summary_concurrency: int = 4
 
     # ---- Embedding / rerank ----
     embed_model: str = "BAAI/bge-en-v1.5"

@@ -1,12 +1,17 @@
 name: Eval Gate · Cross-File QA + Phase 2 RAG
 
-# Two evaluation jobs:
+# Three evaluation jobs:
 #
-#   * bench-rag       — Phase 2 hybrid RAG benchmark on the tiny fixture
-#                       with the mock LLM. Always runs on PR; gates merges.
-#   * cross-file-qa   — Phase 4 evaluation harness against a real LLM. Only
-#                       runs on a `run-eval` label or weekly schedule because
-#                       it needs the OPENAI_API_KEY secret.
+#   * bench-rag         — Phase 2 hybrid RAG benchmark on the tiny fixture
+#                         with the mock LLM. Always runs on PR; gates merges.
+#   * bench-qa-mock     — Phase 3 community-vs-hybrid benchmark with the
+#                         mock LLM. Always runs on PR; only validates the
+#                         link (no quality gate) because mock answers are
+#                         identical across routes.
+#   * cross-file-qa     — Phase 3 real-LLM gate (≥ 25% community gain on
+#                         aggregation slice). Only runs on a `run-eval`
+#                         label or weekly schedule because it needs the
+#                         OPENAI_API_KEY secret.
 
 on:
   pull_request:
@@ -40,9 +45,28 @@ jobs:
           pip install -e ".[dev,eval]"
       - name: Phase 2 RAG benchmark (mock LLM)
         env:
-          REPOSAGE_RAG_LLM: mock
+          REPOSAGE_PROFILE: mock
         run: |
           python -m benchmarks.rag.run_eval
+
+  bench-qa-mock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,eval]"
+      - name: Phase 3 cross-file QA benchmark (mock LLM, sanity-only)
+        env:
+          REPOSAGE_PROFILE: mock
+        run: |
+          python -m benchmarks.cross_file_qa.run_eval
 
   cross-file-qa:
     if: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-eval') }}
@@ -58,12 +82,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,eval]"
-      - name: Run benchmark
+      - name: Run benchmark (community vs hybrid, ≥ +0.25 absolute gain on aggregation slice)
         env:
+          REPOSAGE_PROFILE: production
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python -m benchmarks.cross_file_qa.run_eval --route auto
+          python -m benchmarks.cross_file_qa.run_eval
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
