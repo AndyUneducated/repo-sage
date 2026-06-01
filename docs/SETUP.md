@@ -6,7 +6,7 @@ This is the practical day-to-day setup; the README has the high-level summary.
 
 | Tool | Minimum version | Notes |
 | --- | --- | --- |
-| Python | 3.11 | 3.12 recommended; `uv` is the fastest installer. |
+| Python | 3.12 | Required by `pyproject.toml` (`requires-python = ">=3.12"`); `uv` is the fastest installer. |
 | Go | 1.22 | Needed for `go-hnsw`. |
 | Make | any | Most workflows are wrapped behind `make` targets. |
 | Git | 2.30+ | LFS not required. |
@@ -38,6 +38,20 @@ make hnsw-run              # uses ./data/reposage.db, model=BAAI/bge-en-v1.5, di
 
 # terminal 2 — HTTP service
 make dev                   # uvicorn on :8000, autoreload on
+```
+
+```mermaid
+flowchart LR
+  subgraph T1["terminal 1"]
+    HNSW["make hnsw-run<br/>:50051"]
+  end
+  subgraph T2["terminal 2"]
+    API["make dev<br/>uvicorn :8000"]
+  end
+  DB[(data/reposage.db)]
+  DB -.->|cold-load embeddings| HNSW
+  API <-->|gRPC| HNSW
+  API --> DB
 ```
 
 `hnsw-run` cold-loads embeddings out of the SQLite index (built by

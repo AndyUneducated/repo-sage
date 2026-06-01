@@ -13,6 +13,21 @@
 - 50 kLOC 仓库 P50 端到端 < 1.5 s；20 题手工质检通过率 100 %。
 - 演示：`langchain_classic` 上正确回答 “How is the session timeout configured?”。
 
+`hybrid` 路径的完整链路（每一步把候选数收窄）：
+
+```mermaid
+flowchart LR
+  Q["question"] --> E["embed<br/>bge-en-v1.5"]
+  E --> Dense["dense<br/>go-hnsw"]
+  Q --> Sparse["sparse<br/>rank-bm25"]
+  Dense -->|top-50| RRF["RRF 融合<br/>k=60"]
+  Sparse -->|top-50| RRF
+  RRF -->|top-20| Rerank["reranker<br/>bge-reranker-v2-m3"]
+  Rerank -->|top-8| LLM["LiteLLM 生成"]
+  LLM --> Ground["citation grounding<br/>校验引用真实存在"]
+  Ground --> Resp["AskResponse"]
+```
+
 ## 2. 行业标准对齐
 
 | 选择 | 引用 / 默认 |
@@ -49,6 +64,21 @@ CREATE INDEX IF NOT EXISTS embeddings_model ON embeddings(model);
 ```
 
 `hnsw-server` 启动：批量 `SELECT chunk_id, vector FROM embeddings WHERE model=?` → 调 `Add(idx, vec)` 灌入；启动 1× O(N log N) HNSW 构建。
+
+```mermaid
+flowchart LR
+  subgraph Index["reposage index（写入期）"]
+    File["每个文件"] --> Chunk["chunks<br/>(Phase 1 已写)"]
+    Chunk --> Embed["embedder.embed"]
+    Embed --> Emb[("embeddings<br/>同一事务写入")]
+  end
+  subgraph Boot["hnsw-server（启动期）"]
+    Emb -.->|"冷启动: 批量 SELECT"| Load["Add(idx, vec)"]
+    Load --> Graph["HNSW 图<br/>(内存)"]
+  end
+```
+
+> **原子性**：`chunks` 与 `embeddings` 在同一个 SQLite 事务里写入，崩溃时不会出现"有 chunk 没向量"的半状态（half-state）。
 
 ## 5. 关键文件
 

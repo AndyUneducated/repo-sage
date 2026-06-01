@@ -8,6 +8,21 @@ Hierarchical Navigable Small World (HNSW) graph index — implemented from scrat
 
 This module is intentionally consumable on its own (`go get github.com/AndyUneducated/repo-sage/go-hnsw`). The `reposage` Python service talks to it through a tiny gRPC server in `cmd/server/`.
 
+## HNSW in one picture
+
+HNSW is a **layered** graph. The top layers are sparse (few nodes, long links); the bottom layer holds every vector. A search enters at the top, greedily hops toward the query, then drops a layer and repeats — so most of the corpus is skipped.
+
+```mermaid
+flowchart TD
+  Entry["entry point<br/>(top layer)"] --> L2["Layer 2 — sparse<br/>long-range hops"]
+  L2 --> L1["Layer 1 — denser"]
+  L1 --> L0["Layer 0 — all vectors<br/>ef-bounded beam search"]
+  L0 --> KNN["top-k nearest neighbours"]
+```
+
+* **Insert** (Algorithm 1): pick a random max level for the new node, then link it to its `M` nearest neighbours on each layer it appears in.
+* **Search** (Algorithm 5): descend layer by layer; at layer 0 keep an `efSearch`-sized candidate beam and return the closest `k`.
+
 ## Why a from-scratch implementation
 
 * **Transparency**: every knob (`M`, `efConstruction`, `efSearch`, level multiplier, distance) is in code we own and can profile.

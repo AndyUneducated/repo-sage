@@ -1,5 +1,7 @@
-# Phase 1 — 索引器 v1：tree-sitter（语法树解析器）+ 符号图（代码里谁定义/谁调用谁的关系网）（技术方案）
+# Phase 1 — 索引器（indexer）v1：tree-sitter + 符号图（symbol graph）
 
+> 技术方案（technical design）。tree-sitter 是语法树解析器；符号图记录"代码里谁定义、谁调用、谁继承、谁导入谁"的关系网。
+>
 > 本文是本仓库 Phase 1 的最终技术方案，与 [`docs/ROADMAP.md`](../ROADMAP.md) 第 1 阶段对应。
 > 创建日期：2026-05-21。
 > 同期讨论副本另存于 `~/.cursor/plans/phase_1_indexer_*.plan.md`。
@@ -27,13 +29,31 @@
 
 ## 数据流
 
-```
-walk repo（遍历仓库文件） → parse（解析成语法树） → chunk（分块）     → ChunkStore（块存储）
-                  → extract（抽符号/边） → resolver（解析 FQN） → nodes / edges（节点与边表）
-walk repo → file_meta（单文件元数据，含 file_sha / mtime / parse_status）
+```mermaid
+flowchart LR
+  Walk["walk repo<br/>遍历仓库文件"] --> Parse["parse<br/>解析成语法树"]
+  Parse --> Chunk["chunk<br/>分块"]
+  Chunk --> CS[("ChunkStore<br/>块存储")]
+  Parse --> Extract["extract<br/>抽符号 / 边"]
+  Extract --> Resolver["resolver<br/>解析 FQN"]
+  Resolver --> NE[("nodes / edges<br/>节点与边表")]
+  Walk --> FM[("file_meta<br/>file_sha / mtime / parse_status")]
 ```
 
-## SQLite schema（最终态）
+`resolver` 之所以要**两遍（two-pass）**：第一遍要先看完整个仓库、知道有哪些定义，第二遍才能把一个调用名对到真正的定义上。
+
+```mermaid
+flowchart LR
+  subgraph Pass1["第一遍：收集"]
+    P1["遍历每个文件<br/>收集所有 def + import 绑定"] --> Tbl["全局 FQN 表<br/>+ 每文件局部符号表"]
+  end
+  subgraph Pass2["第二遍：解析"]
+    P2["重走 call / inherit / import 边"] --> Match{"能对到已知 FQN？"}
+    Match -->|能| Resolved["写真实 dst FQN"]
+    Match -->|不能| Unres["写 &lt;unresolved:name&gt;<br/>(留给 Phase 3 兜底)"]
+  end
+  Tbl --> P2
+```
 
 完整字段说明同时落到 [`docs/INDEX_SCHEMA.md`](../INDEX_SCHEMA.md)；这里只列结构。
 

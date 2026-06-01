@@ -9,6 +9,23 @@ and community summaries to the same file.
 Phase 2+ migrations will bump this and ship idempotent `ALTER TABLE`
 scripts gated on the version number.
 
+## How the tables relate
+
+```mermaid
+erDiagram
+  nodes ||--o{ edges : "src / dst reference fqn"
+  chunks ||--o| embeddings : "chunk_id (1:1)"
+  communities ||--o{ community_members : "community_id"
+  communities ||--o| community_embeddings : "community_id (1:1)"
+  nodes ||--o{ community_members : "fqn"
+  repo_meta ||--o{ file_meta : "repo"
+```
+
+* **Phase 1** writes `nodes`, `edges`, `chunks`, `repo_meta`, `file_meta`.
+* **Phase 2** adds `embeddings` (one vector per chunk).
+* **Phase 3** adds the three `communities*` tables.
+* Everything lives in **one** `data/reposage.db` file, so a single `cp` is a full backup.
+
 ## Tables
 
 ### `nodes` — symbol definitions

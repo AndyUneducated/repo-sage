@@ -22,15 +22,30 @@
 
 ## 为什么做 RepoSage
 
-新人加入一个 50 万行的代码仓库后，会问出三类截然不同的问题，而单一机制不可能把它们都答好：
+新人加入一个 50 万行的代码仓库后，会问出三类完全不同的问题。一种工具答不好全部三类，所以 RepoSage 给每一类配一条专门的检索路径（route）：
 
-| 问题类型 | 真正的诉求 | 为什么纯向量 RAG 答不好 |
-| --- | --- | --- |
-| *"`User.login()` 在哪些地方被调用？"* | 确定性的图查询 | top-k 相似度可能漏掉反射调用 / 跨文件边，这是事实问题，不是语义问题。 |
-| *"我想改一下 session timeout，要动哪里？"* | 跨文件、跨片段的推理 | 需要混合检索 + reranker，原始 embedding 不够。 |
-| *"auth 模块和 billing 模块是怎么通信的？"* | 模块级的聚合归纳 | 5–10 个 chunk 描述不了一条模块边界。 |
+| 问题类型 | 它真正想要什么 | 为什么纯向量 RAG（vector RAG）不够 | 对应路径 |
+| --- | --- | --- | --- |
+| *"`User.login()` 在哪些地方被调用？"* | 确定的事实查询（graph query） | top-k 相似度会漏掉跨文件、反射式的调用边——这是事实题，不是语义题 | **graph** |
+| *"改 session timeout 要动哪里？"* | 跨文件、跨片段的语义检索 | 单靠原始 embedding 不准，需要混合检索 + 重排序器（reranker） | **hybrid** |
+| *"auth 模块和 billing 模块怎么通信？"* | 模块级（module-level）的归纳总结 | 5–10 个 chunk 拼不出一条模块边界，需要先把模块"摘要"好 | **community** |
 
-RepoSage 把每类问题路由到合适的索引，而不是用同一个工具硬撑。
+一句话：**先判断问题属于哪一类，再走对应的索引**，而不是把所有问题都塞进同一个向量库硬答。
+
+下面这张图是「一个问题进来后怎么被回答」的全流程：
+
+```mermaid
+flowchart TD
+  Q["用户提问"] --> R{"Query Router<br/>判断问题类型"}
+  R -->|"含具体符号 (FQN)<br/>如 User.login"| G["graph 路径<br/>查 SQLite 邻接表"]
+  R -->|"模块级归纳问题"| C["community 路径<br/>取相关社区摘要"]
+  R -->|"其它语义问题 (兜底)"| H["hybrid 路径<br/>HNSW + BM25 + reranker"]
+  G --> A["拼装上下文 → LLM<br/>生成带 file:line 引用的答案"]
+  C --> A
+  H --> A
+  A --> V["Grounding 校验<br/>引用必须真实存在"]
+  V --> OUT["GitHub App 回复 / CLI 输出"]
+```
 
 ## 整体架构（一张图）
 
@@ -71,10 +86,12 @@ graph LR
 
 ## 有什么新东西
 
-1. **`go-hnsw/` —— 用 Go 从零实现的 HNSW。** 实现自 Malkov 2018，带 `mmap` 持久化；在 SIFT-1M 上和 Faiss 做对照基准，沿 `M` / `efConstruction` / `efSearch` 维度报告 QPS / 内存 / P99 延迟。整个模块本身就是一个独立可用的 Go module。
-2. **双索引检索。** Symbol Graph（确定性）+ GraphRAG 社区摘要（聚合）+ 混合 向量/BM25（语义兜底）。一个轻量级 query router 负责挑路径。在自建的 200 题跨文件基准上，相比纯向量基线，回答准确率 +30%。
-3. **自建评测 Harness。** 跨 Python / TypeScript / Go 三种语言、共 200 题人工标注的跨文件问答集，用 Ragas + 自定义引用对齐校验打分，并以 CI 回归门的形式接入。
-4. **代码智能栈的"读"侧。** 与做"写"侧（重构 / mutation）的姐妹项目共享同一份索引格式。
+| 亮点 | 说明 |
+| --- | --- |
+| **`go-hnsw/`：从零自研的 HNSW** | 用 Go 实现 Malkov & Yashunin 2018 的 HNSW，带 `mmap` 持久化。在 SIFT-1M 上与 Faiss 做对照，沿 `M` / `efConstruction` / `efSearch` 报告 QPS、内存、P99 延迟。本身是一个可独立 `go get` 的 Go module。 |
+| **双索引检索（dual-index）** | Symbol Graph（确定性）+ GraphRAG 社区摘要（聚合）+ 向量/BM25 混合检索（语义兜底），由一个轻量 query router 选路。**目标**：在自建 200 题跨文件基准上，相比纯向量基线把回答准确率提升 ≥ 25%（见 [ROADMAP](docs/ROADMAP.md) Phase 3 退出指标；实测数字以 [BENCHMARKS](docs/BENCHMARKS.md) 为唯一来源，当前为 pending）。 |
+| **自建评测 harness** | 横跨 Python / TypeScript / Go、共 200 题人工标注的跨文件问答集；用 Ragas + 自定义引用对齐校验打分，并接入 CI 作为回归门（regression gate）。 |
+| **代码智能栈的"读"侧** | 与负责"写"侧（重构 / mutation）的姐妹项目共享同一份索引格式。 |
 
 ## 快速开始
 
@@ -98,6 +115,8 @@ python -m reposage.cli index --repo /path/to/your/repo
 # 5. 问问题
 python -m reposage.cli ask "where is User.login called?"
 ```
+
+> **零密钥起步**：默认 profile 是 `mock`（全部用确定性假实现，不需要任何 API key 或 Go 二进制），适合第一次跑通流程。换成 `local`（真实模型、本地 Ollama）或 `production`（接 gRPC + 云端 LLM）只需改一个环境变量 `REPOSAGE_PROFILE`，详见 [`docs/SETUP.md`](docs/SETUP.md)。
 
 ## 仓库结构
 

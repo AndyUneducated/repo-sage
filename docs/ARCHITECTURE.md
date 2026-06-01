@@ -8,22 +8,37 @@ RepoSage answers questions about a code repository the way an experienced teamma
 
 ## 2. Two halves: indexing and serving
 
-The system is two largely independent pipelines that share a SQLite database and a vector store:
+The system is two largely independent pipelines that share a SQLite database and a vector store.
 
+**Indexing (async, runs on a `push` event):**
+
+```mermaid
+flowchart LR
+  Push["push event"] --> Parse[parse]
+  Parse --> Chunk[chunk]
+  Chunk --> Embed[embed]
+  Embed --> HNSW[(go-hnsw)]
+  Parse --> Sym["symbol-graph<br/>extraction"]
+  Sym --> Leiden["Leiden<br/>communities"]
+  Leiden --> Sum[summaries]
+  Sym --> DB[(SQLite)]
+  Chunk --> DB
+  Sum --> DB
 ```
-                  ┌─────────────────────────── indexing (async) ──────────────────────────┐
-push event ─►  parse ─►  chunk ─►  embed ─────────────────────────────────────────►  HNSW
-                       │                                                              ▲
-                       └►  symbol-graph extraction ─►  Leiden communities ─►  summaries
-                                                  │                            │
-                                                  └────────►  SQLite  ◄────────┘
-                  └────────────────────────────────────────────────────────────────────────┘
 
-                  ┌─────────────────────────── serving (online) ──────────────────────────┐
-question ─►  router ──┬─►  symbol-graph adjacency ────────────────►   ┐
-                      ├─►  community summary lookup ────────────────►  context ─►  LLM ─►  answer + citations
-                      └─►  hybrid retrieval (HNSW + BM25 + RRF + reranker) ─►   ┘
-                  └────────────────────────────────────────────────────────────────────────┘
+**Serving (online, runs on a question):**
+
+```mermaid
+flowchart LR
+  Quest["question"] --> Router{router}
+  Router -->|graph| GA["symbol-graph adjacency"]
+  Router -->|community| CS["community summary lookup"]
+  Router -->|hybrid| HR["hybrid retrieval<br/>HNSW + BM25 + RRF + reranker"]
+  GA --> Ctx[context]
+  CS --> Ctx
+  HR --> Ctx
+  Ctx --> LLM[LLM]
+  LLM --> Ans["answer + citations"]
 ```
 
 This split keeps the online path fast (no model downloads, no parsing) while the indexing path can run with whatever batch parallelism is appropriate for the host.
@@ -78,6 +93,18 @@ For semantic questions we run two retrievers in parallel:
 
 Both branches return their top-50 candidates, which are fused with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (`k=60`, the original paper's default). RRF is score-scale invariant — we do not need to normalise BM25 scores against cosine similarity. The fused top-20 then goes through `bge-reranker-v2-m3` for cross-encoder rescoring; the resulting top-8 is handed to the LLM.
 
+```mermaid
+flowchart LR
+  Q[query] --> D["dense: go-hnsw"]
+  Q --> S["sparse: BM25"]
+  D -->|top-50| RRF["RRF fuse<br/>k=60"]
+  S -->|top-50| RRF
+  RRF -->|top-20| RR["cross-encoder<br/>reranker"]
+  RR -->|top-8| LLM[LLM]
+```
+
+The funnel narrows at each stage — `50 + 50 → 20 → 8` — so the expensive cross-encoder only ever scores 20 candidates, not the whole corpus.
+
 The Phase 2 plumbing is mediated by four `Protocol`s
 (`SparseRetriever`, `DenseRetriever`, `Reranker`, `LLMClient`) in
 [`reposage/retrieval/protocols.py`](../reposage/retrieval/protocols.py).
@@ -93,6 +120,21 @@ The HTTP and CLI both call into a single `RetrievalService.answer(...)` so they 
 ## 5. The Go HNSW module
 
 `go-hnsw/` is a separate Go module so it can be consumed independently.
+
+```mermaid
+flowchart LR
+  subgraph Python
+    Pipe["indexer pipeline"]
+    Ret["RetrievalService"]
+  end
+  subgraph Go["go-hnsw server"]
+    Idx["HNSW Index<br/>(in-memory)"]
+  end
+  DB[(SQLite<br/>embeddings)]
+  Pipe -->|write vectors| DB
+  DB -.->|cold start: stream + Add| Idx
+  Ret <-->|"gRPC: Add / Search / Stats"| Idx
+```
 
 * **Algorithm**: from-scratch implementation of Malkov & Yashunin (2018)
   Algorithms 1 (insert) + 5 (search), with a min/max-heap candidate set

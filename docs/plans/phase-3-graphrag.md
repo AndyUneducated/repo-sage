@@ -9,7 +9,7 @@
 路线图 Phase 3 退出指标：
 
 - `reposage ask --route community` 能回答 *"auth 和 billing 模块如何交互"* 这类模块级（module-level，跨文件 / 跨子目录）问题，答案附 `[path:start-end]` 引用（citation，引用来源行号区间）。
-- 200 题跨文件基准（[benchmarks/cross_file_qa/questions.jsonl](benchmarks/cross_file_qa/questions.jsonl)）的前 50 题写完参考答案；其中 40 道模块聚合题（aggregation question，需要把多个 chunk 合起来的题）上 `community` 路由相对 `hybrid` 路由的 Ragas（一套基于 LLM 的 RAG 评测库）`answer_correctness`（答案正确性，0–1 之间的分数）**绝对提升 ≥ 25%**。
+- 200 题跨文件基准（[benchmarks/cross_file_qa/questions.jsonl](../../benchmarks/cross_file_qa/questions.jsonl)）的前 50 题写完参考答案；其中 40 道模块聚合题（aggregation question，需要把多个 chunk 合起来的题）上 `community` 路由相对 `hybrid` 路由的 Ragas（一套基于 LLM 的 RAG 评测库）`answer_correctness`（答案正确性，0–1 之间的分数）**绝对提升 ≥ 25%**。
 - 演示：在 `tests/fixtures/tiny_python_repo` 或某真实 OSS 仓库上跑 *"how do the auth and billing modules interact?"*，答案引用多个模块且含社区摘要。
 
 ## 2. 行业标准对齐
@@ -21,7 +21,7 @@
 | 检测目标函数 | `RBConfigurationVertexPartition`（resolution-controlled modularity，可调节社区粒度的模块度变体），`resolution_parameter=1.0` |
 | 层次结构 | 多层迭代 Leiden（multi-level，类似 Microsoft GraphRAG 2024 论文 Edge et al. 中的 Level-0 / Level-1 / Level-2） |
 | 摘要范式 | **Map-Reduce summary**（Microsoft GraphRAG：先对每个叶子社区单独摘要，再向上滚动合并） |
-| 边权重 | 复用 [reposage/storage/sqlite_graph.py](reposage/storage/sqlite_graph.py) 的 `edges.weight`（DD-009 已经在 Phase 1 写好） |
+| 边权重 | 复用 [reposage/storage/sqlite_graph.py](../../reposage/storage/sqlite_graph.py) 的 `edges.weight`（DD-009 已经在 Phase 1 写好） |
 | 边的种类 | `call`（调用）+ `inherit`（继承）；显式排除 `import`（导入边过密，会让所有文件挤进一个社区） |
 | 摘要 LLM | 复用 LiteLLM（DD-007），新增 `Settings.summarizer_model`，默认 `ollama_chat/qwen2.5-coder:3b`（更小，便于批量摘要） |
 | 评测 | Ragas `answer_correctness`（LLM-judge 综合 factual + semantic 的标准指标） |
@@ -30,13 +30,13 @@
 ## 3. 前后向兼容设计
 
 - **不动 Phase 1 / 2 表**。新增三张独立表（`communities` / `community_members` / `community_embeddings`），与现有 `nodes` / `edges` / `chunks` / `embeddings` 通过 FQN（fully-qualified name，全限定名）与 `chunk_id` 关联，删表不影响主链路。
-- **Protocol 抽象**：新增 `CommunityRetriever` Protocol（[reposage/retrieval/protocols.py](reposage/retrieval/protocols.py)），DD-012 模式延续；Phase 5 mmap HNSW 上线时可直接给 community embeddings 换实现而不动 service。
-- **`AskResponse.graph_context`** 由 `object | None` 收紧为 `CommunityContext | None`（[reposage/api/schemas.py](reposage/api/schemas.py)）——Phase 2 始终为 null，Phase 3 起填值；客户端字段名不变，向后兼容。
+- **Protocol 抽象**：新增 `CommunityRetriever` Protocol（[reposage/retrieval/protocols.py](../../reposage/retrieval/protocols.py)），DD-012 模式延续；Phase 5 mmap HNSW 上线时可直接给 community embeddings 换实现而不动 service。
+- **`AskResponse.graph_context`** 由 `object | None` 收紧为 `CommunityContext | None`（[reposage/api/schemas.py](../../reposage/api/schemas.py)）——Phase 2 始终为 null，Phase 3 起填值；客户端字段名不变，向后兼容。
 - **多模型并存**：`community_embeddings.model` 列与 `embeddings.model` 同源（DD-011 多模型策略），Phase 7 升级 bge（`bge-en-v1.5` 嵌入模型）时可灰度。
 - **增量索引钩子**：`communities.content_sha` 列存「社区成员 FQN + 各成员所在文件 file_sha 排序后的 sha256」。Phase 7 文件变更时，扫一遍受影响 FQN → 用同 sha 命中既有摘要复用，未命中才重摘要。
 - **`reposage index --no-graphrag`** 旗标（CLI flag）：本 Phase 默认开，但保留关闭开关以便：(a) Phase 1 演示场景；(b) CI 上无 LLM 密钥时跳过摘要阶段（依然跑 Leiden，只是不写 `summary`）。
-- **路由不破坏 Phase 2**：[reposage/llm/prompts.py](reposage/llm/prompts.py) 的 `ROUTER_SYSTEM` 已经包含 `community` 三分类，[reposage/services/retrieval_service.py](reposage/services/retrieval_service.py) 第 105–111 行的「community → hybrid 降级」分支被替换为真实实现；router 接口不变。
-- **CommunityStore 接口**已经在 [reposage/storage/community_store.py](reposage/storage/community_store.py) 桩件里固定（`upsert / find_by_member / top_level`），Phase 3 只补实现，不动签名。
+- **路由不破坏 Phase 2**：[reposage/llm/prompts.py](../../reposage/llm/prompts.py) 的 `ROUTER_SYSTEM` 已经包含 `community` 三分类，[reposage/services/retrieval_service.py](../../reposage/services/retrieval_service.py) 第 105–111 行的「community → hybrid 降级」分支被替换为真实实现；router 接口不变。
+- **CommunityStore 接口**已经在 [reposage/storage/community_store.py](../../reposage/storage/community_store.py) 桩件里固定（`upsert / find_by_member / top_level`），Phase 3 只补实现，不动签名。
 
 ## 4. 数据流（含原子性边界）
 
@@ -74,7 +74,7 @@ flowchart LR
 
 ## 5. SQLite schema（新增三张表）
 
-完整字段说明同时落到 [docs/INDEX_SCHEMA.md](docs/INDEX_SCHEMA.md)：
+完整字段说明同时落到 [docs/INDEX_SCHEMA.md](../INDEX_SCHEMA.md)：
 
 ```sql
 CREATE TABLE communities(
@@ -125,19 +125,19 @@ CREATE INDEX community_embeddings_model ON community_embeddings(model);
 
 ### 6.2 实现（桩件 → 正式）
 
-- [reposage/indexer/graphrag/community.py](reposage/indexer/graphrag/community.py)：实现 `CommunityDetector.detect`：
+- [reposage/indexer/graphrag/community.py](../../reposage/indexer/graphrag/community.py)：实现 `CommunityDetector.detect`：
   1. 调 `subgraph.build_igraph` 拿无向加权图。
   2. `leidenalg.find_partition(g, RBConfigurationVertexPartition, weights="weight", resolution_parameter=self.resolution, seed=self.seed)` 得 level-0 划分。
   3. 收缩图（contract：把同一社区折成超级节点，边权累加）→ 再跑 Leiden → level-1；递归到 `max_levels`（默认 3）。
   4. 过滤 `member_count < min_size`（默认 3）的社区合并到父级，避免单元素噪声社区。
   5. 输出 `list[Community]`，`Community.parent_id` 串起层次。
-- [reposage/indexer/graphrag/summarizer.py](reposage/indexer/graphrag/summarizer.py)：实现 `CommunitySummarizer.summarize`：
+- [reposage/indexer/graphrag/summarizer.py](../../reposage/indexer/graphrag/summarizer.py)：实现 `CommunitySummarizer.summarize`：
   1. **Map**（并行）：对每个 level-0 社区，挑 `seed` 成员 → 抓对应 chunk → 调 `LLMClient.complete(build_community_summary_messages(...))` → 抽 `title` + `summary`。
   2. **Reduce**（并行）：对每个 level-1+ 社区，把子社区的 `summary` 拼接作为输入，调 LLM 写一层摘要。
   3. `content_sha` 命中既有 row 时跳过 LLM 直接复用，**节省 token**（Microsoft GraphRAG 也是这套缓存模式）。
   4. 使用 `asyncio.Semaphore` 限并发（默认 4，避免本地 Ollama 排队）。
-- [reposage/storage/community_store.py](reposage/storage/community_store.py)：实现 `init_schema / upsert / find_by_member / top_level / get_subtree / upsert_embedding / iter_embeddings_for_model`。沿用 [reposage/storage/sqlite_graph.py](reposage/storage/sqlite_graph.py) 的 `WAL + synchronous=NORMAL + foreign_keys=ON` 三件套。
-- [reposage/indexer/pipeline.py](reposage/indexer/pipeline.py)：`run()` 末尾追加 stage：
+- [reposage/storage/community_store.py](../../reposage/storage/community_store.py)：实现 `init_schema / upsert / find_by_member / top_level / get_subtree / upsert_embedding / iter_embeddings_for_model`。沿用 [reposage/storage/sqlite_graph.py](../../reposage/storage/sqlite_graph.py) 的 `WAL + synchronous=NORMAL + foreign_keys=ON` 三件套。
+- [reposage/indexer/pipeline.py](../../reposage/indexer/pipeline.py)：`run()` 末尾追加 stage：
   ```text
   ... resolver.resolve(extractions) → 写 nodes/edges
   if self.graphrag and not force_skip:
@@ -146,15 +146,15 @@ CREATE INDEX community_embeddings_model ON community_embeddings(model);
       community_store.upsert(summarized)
       embedder.embed([c.summary for c in summarized]) → community_store.upsert_embedding(...)
   ```
-- [reposage/services/retrieval_service.py](reposage/services/retrieval_service.py)：把第 105–111 行的 community→hybrid 降级换成 `_answer_community(question, decision, t0, top_k)`：
+- [reposage/services/retrieval_service.py](../../reposage/services/retrieval_service.py)：把第 105–111 行的 community→hybrid 降级换成 `_answer_community(question, decision, t0, top_k)`：
   1. embed question
   2. `community_retriever.retrieve(qvec, top_k=3)` → top-3 社区
   3. 对每个社区，按 seed FQN 抓 1–2 个 chunk（仍走 chunk_store）作为引用源
   4. `build_community_answer_messages(question, communities, chunks)` → LLM → grounding（DD-013 不变）
   5. 填充 `AnswerResult.graph_context = CommunityContext(...)`
-- [reposage/llm/prompts.py](reposage/llm/prompts.py)：新增 `build_community_summary_messages`、`build_community_answer_messages`；后者把社区摘要放在 `<community summary="..." level="...">` 块，**chunk 仍按 Phase 2 `<retrieved_chunk>` 格式**，保证 grounding 校验器不用动。
-- [reposage/cli.py](reposage/cli.py)：`reposage index` 加 `--no-graphrag` 开关；`reposage ask --route community` 现在真的会跑社区路径而不是被服务层悄悄降级。
-- [reposage/config.py](reposage/config.py)：新增
+- [reposage/llm/prompts.py](../../reposage/llm/prompts.py)：新增 `build_community_summary_messages`、`build_community_answer_messages`；后者把社区摘要放在 `<community summary="..." level="...">` 块，**chunk 仍按 Phase 2 `<retrieved_chunk>` 格式**，保证 grounding 校验器不用动。
+- [reposage/cli.py](../../reposage/cli.py)：`reposage index` 加 `--no-graphrag` 开关；`reposage ask --route community` 现在真的会跑社区路径而不是被服务层悄悄降级。
+- [reposage/config.py](../../reposage/config.py)：新增
   ```python
   summarizer_model: str = "ollama_chat/qwen2.5-coder:3b"
   community_resolution: float = 1.0
@@ -165,9 +165,9 @@ CREATE INDEX community_embeddings_model ON community_embeddings(model);
 
 ### 6.3 配置 / 工具
 
-- [pyproject.toml](pyproject.toml)：加 `python-igraph>=0.11`、`leidenalg>=0.10`。两者都是纯 Python wheel + 预编译 C，安装无需系统编译器。
-- [Makefile](Makefile)：新增 `bench-qa-community`：跑前 50 题，分 `--route community` 与 `--route hybrid` 两份成绩，输出 Ragas `answer_correctness` 差值。
-- [.github/workflows/eval-gate.yml](.github/workflows/eval-gate.yml)：`run-eval` 标签 PR 上额外跑 `bench-qa-community`（mock LLM 模式，仅校验链路，不卡分值）；每周一 cron 用真实 LLM 跑硬门槛（≥ 25% 绝对提升）。
+- [pyproject.toml](../../pyproject.toml)：加 `python-igraph>=0.11`、`leidenalg>=0.10`。两者都是纯 Python wheel + 预编译 C，安装无需系统编译器。
+- [Makefile](../../Makefile)：新增 `bench-qa-community`：跑前 50 题，分 `--route community` 与 `--route hybrid` 两份成绩，输出 Ragas `answer_correctness` 差值。
+- [.github/workflows/eval-gate.yml](../../.github/workflows/eval-gate.yml)：`run-eval` 标签 PR 上额外跑 `bench-qa-community`（mock LLM 模式，仅校验链路，不卡分值）；每周一 cron 用真实 LLM 跑硬门槛（≥ 25% 绝对提升）。
 
 ## 7. 路由 / 检索流程契约
 
@@ -221,7 +221,7 @@ sequenceDiagram
 
 ## 8. 测试矩阵
 
-### 单测（[tests/unit/](tests/unit/)，不依赖大模型 / Go）
+### 单测（[tests/unit/](../../tests/unit/)，不依赖大模型 / Go）
 
 - `test_subgraph.py`：构造已知图，断言对称化后边权 = `weight(a→b) + weight(b→a)`，未解析 dst 被过滤。
 - `test_community_detector.py`：构造一个明显的「两团 + 一座桥」拓扑，断言 Leiden 划成 2 个社区；固定 seed → 划分稳定。
@@ -230,19 +230,19 @@ sequenceDiagram
 - `test_community_retriever.py`：3 个社区固定向量 + 一个 query，`LocalCommunityRetriever` 返回正确顺序；空索引返回空列表。
 - `test_prompts.py`（扩展）：`build_community_answer_messages` 同时含 `<community>` 与 `<retrieved_chunk>` 块；`build_community_summary_messages` 不泄漏行号占位符。
 
-### 集成（[tests/integration/](tests/integration/)）
+### 集成（[tests/integration/](../../tests/integration/)）
 
 - `test_graphrag_e2e.py`：`tiny_python_repo` + `HashEmbedder` + `MockLLMClient`：跑 `IndexPipeline` → 断言至少 2 个社区、每个社区都有非空 `summary`；调 `RetrievalService.answer("how do auth and billing interact?", route_hint="community")` → 答案非空、`grounded=True`、`graph_context.communities` ≥ 2 条。
 - `test_qa_bench.py`（pytest mark `requires_ollama`，可选）：跑 `benchmarks/cross_file_qa` 前 50 题，断言 community vs hybrid `answer_correctness` 差值 ≥ 0.25。
 
 ### Bench
 
-- [benchmarks/cross_file_qa/questions.jsonl](benchmarks/cross_file_qa/questions.jsonl)：扩到 50 条（含 40 道模块聚合题 + 5 道 graph 路由对照 + 5 道 hybrid 路由对照），每条带 `reference_answer` 和 `expected_citations: [{path, lines}]`。
-- [benchmarks/cross_file_qa/run_eval.py](benchmarks/cross_file_qa/run_eval.py)：从当前 stub 改为真实 harness：
+- [benchmarks/cross_file_qa/questions.jsonl](../../benchmarks/cross_file_qa/questions.jsonl)：扩到 50 条（含 40 道模块聚合题 + 5 道 graph 路由对照 + 5 道 hybrid 路由对照），每条带 `reference_answer` 和 `expected_citations: [{path, lines}]`。
+- [benchmarks/cross_file_qa/run_eval.py](../../benchmarks/cross_file_qa/run_eval.py)：从当前 stub 改为真实 harness：
   - 对每题跑 `--route community` 与 `--route hybrid`
   - 算 Ragas `answer_correctness`、citation 合法率（cited path:line 必须真实落在 expected 范围 ±5 行内）、端到端延迟 P50 / P95
-  - 输出 `results/<date>.csv` + Markdown 表写到 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)（DD：「BENCHMARKS.md 是对外数字的唯一来源」）
-- `make bench-qa` 把 `bench-qa-community` 合进来，与 [benchmarks/rag/run_eval.py](benchmarks/rag/run_eval.py)（Phase 2 已有）解耦。
+  - 输出 `results/<date>.csv` + Markdown 表写到 [docs/BENCHMARKS.md](../BENCHMARKS.md)（DD：「BENCHMARKS.md 是对外数字的唯一来源」）
+- `make bench-qa` 把 `bench-qa-community` 合进来，与 [benchmarks/rag/run_eval.py](../../benchmarks/rag/run_eval.py)（Phase 2 已有）解耦。
 
 ## 9. 非目标（Phase 3 不做）
 

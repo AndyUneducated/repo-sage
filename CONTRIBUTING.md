@@ -1,74 +1,91 @@
-# 贡献指南 / Contributing
+# Contributing
 
-欢迎为 RepoSage 提 issue 或 PR —— 尤其是这些方向：
+Thanks for the interest. RepoSage is moving quickly through the phases in [`docs/ROADMAP.md`](docs/ROADMAP.md) — please read that file before opening a feature PR so we are not duplicating work that is already designed for a later phase.
 
-- 给 `go-hnsw/` 写更多 ANN 基准（高维 / 大规模 / 不同分布）。
-- 在 `benchmarks/cross_file_qa/` 里补充新语言（Rust / Java / Kotlin …）的问答样本。
-- 改进 GraphRAG 社区摘要的质量（更好的 Leiden 参数、更好的摘要 prompt）。
-- 接入新的 LLM provider（通过 `reposage.llm` 的 LiteLLM 抽象）。
+We especially welcome contributions in these areas:
 
-## 1. 本地开发环境
+- More ANN benchmarks for `go-hnsw/` (high-dimensional / large-scale / different distributions).
+- New cross-file QA questions in `benchmarks/cross_file_qa/` (Rust, Java, Kotlin, …).
+- Better GraphRAG community summaries (Leiden tuning, summary prompts).
+- New LLM providers via the LiteLLM abstraction in `reposage.llm`.
+
+## 1. Local setup
 
 ```bash
-# 克隆 & 安装 Python 依赖（推荐 uv）
 git clone https://github.com/AndyUneducated/repo-sage.git
 cd repo-sage
-make install
+make install-dev          # dev + eval deps; runs pre-commit install
 
-# 编译 Go HNSW
-make hnsw-build
-
-# 启动本地 dev 栈
-make dev
+make hnsw-build           # build go-hnsw server + bench binaries
+make dev                  # FastAPI on :8000 (see docs/SETUP.md for the full stack)
 ```
 
-要求：
+Requirements:
 
-- Python 3.12+（推荐用 [`uv`](https://docs.astral.sh/uv/) 管理）
+- Python 3.12+ ([`uv`](https://docs.astral.sh/uv/) recommended)
 - Go 1.22+
-- SQLite（系统自带即可）
-- 本地 LLM 推理：可选 Ollama，或在 `.env` 里配 LiteLLM 兼容的云端 provider
+- SQLite (system default is fine)
+- Local LLM: optional Ollama, or a hosted LiteLLM-compatible provider in `.env`
 
-## 2. 提交前自检（与 CI 一致）
+Full day-to-day setup (profiles, indexing, asking questions) lives in [`docs/SETUP.md`](docs/SETUP.md).
 
-```bash
-make lint        # ruff + go vet + gofmt
-make typecheck   # mypy + go build
-make test        # pytest + go test ./...
-```
+## 2. Workflow
 
-`pre-commit` 钩子在仓库根目录已就位，安装一次即可：
+1. Pick (or open) an issue tagged with the relevant phase milestone.
+2. Branch off `main`. Branch naming: `<phase>/<short-slug>` (e.g. `phase-2/rrf-fusion`).
+3. Before pushing, run the same checks CI runs:
 
-```bash
-pre-commit install
-```
+   ```bash
+   make lint        # ruff + go vet + gofmt
+   make typecheck   # mypy strict
+   make test        # pytest + go test (mock profile; skips gRPC / Ollama marks)
+   ```
 
-## 3. 写代码的几条约定
+   Or run everything at once: `make precommit`.
 
-- **不要把生成的索引产物 commit 进来。** `*.db`、`*.idx`、embedding cache 都已经在 `.gitignore`。
-- **跨进程 / 跨语言的边界要写契约**。Python 与 `go-hnsw` 之间的协议改动需同步两侧测试。
-- **重大设计决策**写到 [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md)，按 ADR 风格追加；阶段性进展写到 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
-- **基准结果**要可复现：在 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) 写清硬件、参数、随机种子。
+4. Open a PR using the template. If you touched retrieval, attach a `make bench-qa` or `make bench-rag` delta vs baseline.
 
-## 4. Commit 信息
+`pre-commit` hooks are configured at the repo root — `make install-dev` installs them; you can also run `pre-commit install` manually.
 
-- 用英文简短说明，遵循 conventional commits 风格（`feat:` / `fix:` / `docs:` / `refactor:` / `chore:` / `test:`）。
-- 一个 commit 只做一件事；跨子模块的改动尽量拆开。
-- PR 描述里包含：**为什么改 / 改了什么 / 怎么测**。
+## 3. Code conventions
 
-## 5. CI 必须通过
+- **Do not commit generated index artefacts.** `*.db`, `*.idx`, and embedding caches are in `.gitignore`.
+- **Cross-process / cross-language boundaries need contracts.** Changes to the Python ↔ `go-hnsw` gRPC protocol must update stubs and tests on both sides (`make proto-gen`).
+- **Major design choices** go in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) (append-only ADR style). Phase progress belongs in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+- **Benchmark numbers** must be reproducible: document hardware, parameters, and random seeds in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-每个 PR 都会跑以下 workflow，全部要绿才会合：
+### Code style
 
-- `ci-python.yml`（Ruff + mypy + pytest）
-- `ci-go.yml`（`go vet` + `go test ./...`）
-- `lint.yml`（pre-commit）
+* Python: ruff + mypy strict. New public APIs must have type hints.
+* Go: `gofmt` + `go vet`. Public API changes need doc comments.
+* Tests: prefer fixture-driven; mark slow tests with `@pytest.mark.slow`.
 
-如果你的改动会修改 ANN 基准或 cross-file QA 评测结果，请在 PR 描述里贴上前后对比。
+## 4. Commit messages
 
-## 6. 较大的提案
+- Short English subject lines; conventional commits (`feat:` / `fix:` / `docs:` / `refactor:` / `chore:` / `test:`).
+- One logical change per commit; split cross-module work when it helps review.
+- PR description: **why** / **what** / **how to test**.
 
-如果你打算加新的索引（除现有的 HNSW / BM25 / Symbol Graph / GraphRAG 之外）、
-换 embedding 模型、或重写 query router，**先开 issue 讨论**，避免你写了很多代码后才发现方向不合。
+## 5. CI must pass
 
-—— 感谢贡献！
+Every PR runs:
+
+- `ci-python.yml` — Ruff + mypy + pytest
+- `ci-go.yml` — `go vet` + `go test ./...`
+- `lint.yml` — pre-commit
+
+If your change moves ANN or cross-file QA numbers, paste before/after in the PR description.
+
+## 6. Adding a benchmark question
+
+* Append to `benchmarks/cross_file_qa/questions.jsonl`.
+* Provide a reference answer and at least one reference citation `(repo, path, start, end)`.
+* Mark the bucket (`graph` / `community` / `hybrid` / `negative`) so the eval harness can score per-route.
+
+## 7. Larger proposals
+
+If you plan to add a new index type (beyond HNSW / BM25 / Symbol Graph / GraphRAG), swap the embedding model, or rewrite the query router, **open an issue first** so we can align before you invest in a large PR.
+
+## 8. Security
+
+Do not file security issues publicly. Email the maintainers instead; encryption keys can be exchanged on request.

@@ -15,6 +15,23 @@
 | 6 | 加固：评测门禁、OTel、性能 | 1.0 周 | Eval-gate 工作流拦截回归；完整 200 题基准；OTel 链路可观测。 |
 | 7 | 延伸：Tantivy / TS+Go 语法 | 灵活 | 替换 BM25；在真实多语言仓库上做多语言索引；博客初稿。 |
 
+各阶段的依赖关系（哪些必须先做、哪些可以并行）：
+
+```mermaid
+flowchart LR
+  P0["Phase 0<br/>骨架 + CI"] --> P1["Phase 1<br/>索引器"]
+  P1 --> P2["Phase 2<br/>混合检索"]
+  P2 --> P3["Phase 3<br/>GraphRAG"]
+  P2 --> P4["Phase 4<br/>GitHub App"]
+  P2 --> P5["Phase 5<br/>go-hnsw v2"]
+  P3 --> P6["Phase 6<br/>加固 + 评测门禁"]
+  P4 --> P6
+  P5 --> P6
+  P6 --> P7["Phase 7<br/>延伸目标"]
+```
+
+> Phase 3 / 4 / 5 都只依赖 Phase 2，理论上可并行推进；Phase 6 把三者收口。
+
 ---
 
 ## 阶段 0 — 骨架与 CI
