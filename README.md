@@ -84,6 +84,204 @@ graph LR
 关键设计取舍见 [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md)。
 基准测试（HNSW vs Faiss on SIFT-1M、200 题跨文件 QA）见 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)。
 
+## Indexing Pipeline（建索引流水线）
+
+索引是离线、异步的一侧：在仓库收到 `push` 事件时触发，把源码转成在线检索能直接用的三种产物——**向量（HNSW）**、**符号图（SQLite）** 和 **社区摘要（community summaries）**。它和在线 serving 共享同一份 SQLite + 向量库，但完全独立运行，因此可以按宿主机的批并行度任意加速，而不影响线上问答延迟。
+
+```mermaid
+flowchart LR
+  Push["push event"]
+
+  subgraph L1["语义通道（chunk → 向量 / 稀疏）"]
+    direction TB
+    Parse["1. Parse<br/>tree-sitter<br/><i>源码 → AST</i>"] --> Chunk["2. Chunk<br/>按 AST 边界<br/><i>产出 chunk_id + 文本</i>"]
+    Chunk --> Embed["3. Embed<br/>bge-en-v1.5<br/><i>chunk 文本 → 768d 向量</i>"]
+  end
+
+  subgraph L2["结构通道（符号图 → 社区）"]
+    direction TB
+    Sym["4. Symbol Graph<br/>def · call · inherit · import<br/><i>FQN + 边</i>"]
+    Sym --> Leiden["5. Leiden<br/>community detection<br/><i>按调用拓扑聚类</i>"]
+    Leiden --> Sum["LLM 摘要<br/><i>每个社区 5–8 句</i>"]
+  end
+
+  subgraph L3["索引产物（在线检索直接消费）"]
+    direction TB
+    HN[("go-hnsw（内存）<br/>chunk_id + 向量 + 图的边<br/><i>只返回 id+distance</i>")]
+    BM[("BM25<br/>chunk_id ↔ 词频")]
+    DB[("SQLite（落盘 / 真身）<br/>chunks: 文本·path·行号<br/>embeddings · nodes · edges · communities")]
+  end
+
+  Push --> Parse
+  Push --> Sym
+
+  Embed -->|"chunk_id + 向量<br/>(冷启动从 embeddings 重建)"| HN
+  Chunk -->|"chunk_id + 词元"| BM
+  Chunk -->|"chunk_id + 文本/path/行号"| DB
+  Embed -->|"chunk_id + 向量 BLOB"| DB
+  Sym -->|"nodes / edges"| DB
+  Sum -->|"communities + 摘要"| DB
+
+  HN -. "用 chunk_id 回表取内容" .-> DB
+```
+
+按阶段拆解（每一步都对应 [`reposage/indexer/`](reposage/indexer) 下的一个模块）：
+
+| 阶段 | 做什么 | 关键取舍 |
+| --- | --- | --- |
+| **1. Parse（解析）** | 用 [tree-sitter](https://tree-sitter.github.io/) 做增量、容错的解析；语法来自 [`tree-sitter-language-pack`](https://github.com/Goldziher/tree-sitter-language-pack)（单 ABI 覆盖 100+ 语言）。 | Phase 1 端到端只打通 Python；TS/JS/Go 仅做 *parse 校验*，落 `file_meta` 时标 `parse_status='unsupported'`，保证覆盖率数字诚实可查。 |
+| **2. Chunk（切块）** | 沿 AST 边界切（函数 / 方法 / 类 / 顶层语句），带最大行数上限和小重叠。 | AST 感知切块让语义完整的单元不被切散，code embedding 明显优于定长窗口切块。 |
+| **3. Embed（向量化）** | 默认 `BAAI/bge-en-v1.5`，懒加载、支持 CPU / MPS / CUDA；向量经 gRPC 推给自建的 `go-hnsw`。同一份 chunk 同时进 BM25 稀疏索引。 | 稠密 + 稀疏双写，为在线 hybrid 检索（HNSW + BM25 + RRF + reranker）备料。 |
+| **4. Symbol Graph（符号图）** | 抽取 `def` / `call` / `inherit` / `import` 四类边，作为邻接表存进 SQLite，并在 `(dst, kind)` / `(src, kind)` 上建覆盖索引。 | **两遍、模块感知的解析**：Pass 1 收集定义与 import 绑定到全局 FQN 表，Pass 2 再解析调用/继承/导入的目标；`self.X` / `cls.X` 查到所在类，点号路径按 import 绑定解析；解析不了的记成 `<unresolved:name>` 以保留计数。 |
+| **5. GraphRAG 社区** | 在符号图上跑 [Leiden](https://www.nature.com/articles/s41598-019-41695-z)（call + inherit + import 作为带权边）划分社区，再让一个更便宜的小模型把每个社区摘成 5–8 句话。 | 社区按 **调用拓扑** 而非目录结构形成——这正是用 Leiden 而不是 `path.split("/")` 的理由；摘要用小模型生成、答题用大模型消费，把成本和质量解耦。 |
+
+最终落地的索引产物：
+
+- **`go-hnsw`** —— 稠密向量（默认 `M=16, efConstruction=200, efSearch=64`），冷启动时从 SQLite 的 `embeddings` 表流式 `Add` 重建。
+- **BM25** —— 稀疏检索（Phase 2 用 rank-bm25，Phase 5/7 换 Tantivy）。
+- **SQLite symbol graph** —— 确定性事实查询的来源；完整 schema 见 [`docs/INDEX_SCHEMA.md`](docs/INDEX_SCHEMA.md)。
+- **Community summaries** —— 模块级归纳问题（community 路径）的来源。
+
+> 索引流水线的长文版本见 [`docs/ARCHITECTURE.md` 第 3 节](docs/ARCHITECTURE.md)；索引落库的字段定义见 [`docs/INDEX_SCHEMA.md`](docs/INDEX_SCHEMA.md)。
+
+### 深入：两遍符号解析（Symbol Graph resolution）
+
+上表「阶段 4」里那句"两遍、模块感知"值得单独画一张图。单遍扫描没法解析"先调用、后定义"或"调用别的文件里的符号"，所以解析分成 **先收集、再连边** 两趟：
+
+```mermaid
+flowchart TB
+  subgraph P1["Pass 1 · 收集（每个文件走一遍）"]
+    direction TB
+    F1["遍历文件 AST"] --> Defs["收集 RawDef<br/>→ 全局 FQN 表"]
+    F1 --> Imp["收集 import 绑定<br/>→ 每模块 local 符号表"]
+  end
+  subgraph P2["Pass 2 · 连边（再遍历每条 RawEdge）"]
+    direction TB
+    F2["遍历 RawEdge"] --> R{"目标怎么解析？"}
+    R -->|"self.X / cls.X"| M1["查所在类的方法"]
+    R -->|"点号路径 op.exists"| M2["按 import 绑定<br/>解析最左项 op→os.path"]
+    R -->|"普通名字"| M3["查 local → 全局 FQN 表"]
+    R -->|"查不到"| U["记为 &lt;unresolved:name&gt;<br/>保留计数供 GraphRAG 分桶"]
+  end
+  Defs & Imp --> F2
+  M1 & M2 & M3 & U --> E["SymbolEdge<br/>def · call · inherit · import"]
+  E --> SG[("SQLite edges 表<br/>(dst,kind) / (src,kind) 覆盖索引")]
+```
+
+实现：每文件原始抽取在 [`reposage/indexer/extractor.py`](reposage/indexer/extractor.py)，跨文件解析在 [`reposage/indexer/python_resolver.py`](reposage/indexer/python_resolver.py)，落库在 [`reposage/storage/sqlite_graph.py`](reposage/storage/sqlite_graph.py)。目前 Python 端到端可用，TS/Go 标 `parse_status='unsupported'`。
+
+### 深入：GraphRAG 社区检测与摘要
+
+「阶段 5」展开就是一条 **聚类 → Map-Reduce 摘要 → 向量化** 的小流水线（由 `--graphrag` 开关控制，CLI 默认开）：
+
+```mermaid
+flowchart TB
+  SG[("SQLite 符号图<br/>nodes + edges")] --> Build["过滤建 igraph<br/>call + inherit，对称化加权"]
+  Build --> Leiden["层次化 Leiden 聚类<br/>level 0 叶子 → level 1+ 上卷"]
+  Leiden --> Persist["持久化 partition<br/>communities + community_members"]
+  Persist --> Map["Map：叶子社区<br/>种子 FQN → chunk 文本 → LLM JSON 摘要"]
+  Persist --> Reduce["Reduce：父社区<br/>上卷子社区摘要"]
+  Map & Reduce --> Mark["标记 seed 成员"]
+  Mark --> Emb["摘要向量化（小模型）"]
+  Emb --> CE[("community_embeddings")]
+```
+
+实现散落在 [`reposage/indexer/graphrag/`](reposage/indexer/graphrag)：建子图 `subgraph.py`、Leiden `community.py`、Map-Reduce 摘要 `summarizer.py`、种子选取 `seed.py`。没有可用 LLM 时跳过摘要，`--no-embed` 时跳过社区向量化——索引仍能跑通，只是少了 community 路径的料。
+
+## 在线检索流水线（Retrieval Pipeline）
+
+索引建好后，线上一条问题怎么变成"带 `file:line` 引用的答案"。这一侧**不下载模型、不解析源码**，所以延迟可控。入口统一是 `RetrievalService.answer(...)`，HTTP（`/ask`）和 CLI 都走它，不会各写一套。
+
+```mermaid
+flowchart TB
+  Q["用户问题"] --> Router{"Query Router<br/>regex 命中 FQN？"}
+  Router -->|"命中具体符号"| G["graph 路径<br/>查 SQLite 邻接表 · 无 LLM"]
+  Router -->|"模块级归纳问题"| Cm["community 路径"]
+  Router -->|"其它 / 路由不确定（兜底）"| H["hybrid 路径"]
+  Cm -. "检索/校验失败则降级" .-> H
+  G & Cm & H --> Ctx["拼装上下文"]
+  Ctx --> LLM["LLM 生成答案 + 引用"]
+  LLM --> V{"grounding 校验<br/>引用是否真实存在？"}
+  V -->|"否 · 重生成一次"| LLM
+  V -->|"是"| OUT["AnswerResult<br/>route · latency_ms · grounded"]
+```
+
+路由逻辑在 [`reposage/retrieval/router.py`](reposage/retrieval/router.py)：先用正则抓明显的 FQN（点号 / 调用 / snake_case），命中直接走 `graph`；否则让一个小 LLM 输出 JSON 路由，解析失败再兜底到 `hybrid`。总调度在 [`reposage/services/retrieval_service.py`](reposage/services/retrieval_service.py)。
+
+### Hybrid 检索漏斗（HNSW + BM25 + RRF + reranker）
+
+`hybrid` 路径是语义检索的主力，核心是一个 **逐级收窄的漏斗**：稠密 + 稀疏各取一批 → 融合 → 重排，让最贵的 cross-encoder 只打分 20 条，而不是整个语料库。
+
+```mermaid
+flowchart LR
+  Q["query"] --> E["embed 查询向量"]
+  E --> D["稠密：go-hnsw<br/>(本地档用 cosine 扫描)"]
+  Q --> S["稀疏：BM25 over 代码词元"]
+  D -->|"top-50 chunk_id"| RRF["RRF 融合<br/>k=60，免归一化"]
+  S -->|"top-50 chunk_id"| RRF
+  RRF -->|"top-20 chunk_id"| Hy["回 SQLite chunks<br/>取文本 / path / 行号"]
+  Hy --> RR["cross-encoder reranker<br/>bge-reranker-v2-m3"]
+  RR -->|"top-k"| LLM["LLM"]
+```
+
+注意稠密分支返回的还是 `chunk_id`，要回 `chunks` 表 hydrate 出文本才能重排——和前面索引图里 `go-hnsw -.-> SQLite` 那条虚线是同一回事。实现：编排 [`reposage/retrieval/hybrid.py`](reposage/retrieval/hybrid.py)、gRPC 客户端 `hnsw_client.py`、本地稠密 `local_dense.py`、稀疏 `bm25.py`、重排 `reranker.py`。
+
+### Grounding：引用校验循环（防止编造引用）
+
+答案里的每个 `[path:lo-hi]` 都必须真实落在某个检索到的 chunk 行号区间内，否则视为编造。这是一个最多重试一次的 **两击封顶** 循环：
+
+```mermaid
+flowchart TB
+  In["检索到的 chunks<br/>(repo, path, start_line, end_line)"] --> Gen["LLM.complete 生成答案"]
+  Gen --> Ext["抽取所有 [path:lo-hi] 引用"]
+  Ext --> Chk{"每条引用都落在<br/>某 chunk 行号区间内？"}
+  Chk -->|"是"| OK["返回答案 · grounded=True"]
+  Chk -->|"否 · 第 1 次"| Re["重生成一次<br/>把违规引用列入禁用清单"]
+  Re --> Gen
+  Chk -->|"否 · 第 2 次仍失败"| Strip["剔除违规引用<br/>返回 grounded=False"]
+```
+
+校验器在 [`reposage/llm/grounding.py`](reposage/llm/grounding.py)，重生成逻辑在 `RetrievalService._regenerate`。两击封顶是刻意的成本护栏（DD-013）。
+
+## 运行形态：Profile 装配（mock / local / production）
+
+同一套 `RetrievalService` 在三种 profile 下装配不同的"零件"，靠一个环境变量 `REPOSAGE_PROFILE` 切换——这就是为什么第一次跑不需要任何 API key。
+
+```mermaid
+flowchart LR
+  Env["REPOSAGE_PROFILE"] --> Comp{"composition.py<br/>按 profile 选零件"}
+  Comp -->|"mock（默认）"| M["LocalDense(SQLite) · MockReranker · MockLLM<br/>零密钥 · 全确定性"]
+  Comp -->|"local"| L["LocalDense · CrossEncoder · LiteLLM(本地 Ollama)"]
+  Comp -->|"production"| P["HnswGrpcClient · CrossEncoder · LiteLLM(云端)"]
+  M & L & P --> RS["RetrievalService<br/>(调用方完全不变)"]
+```
+
+| Profile | 稠密后端 | Reranker | LLM | 适用 |
+| --- | --- | --- | --- | --- |
+| `mock` | `LocalDenseIndex`（读 SQLite） | `MockReranker` | `MockLLMClient` | 第一次跑通 / CI |
+| `local` | `LocalDenseIndex` | `CrossEncoderReranker` | `LiteLLMClient`（Ollama） | 本地真实模型 |
+| `production` | `HnswGrpcClient`（gRPC） | `CrossEncoderReranker` | `LiteLLMClient`（云） | 线上 |
+
+装配点在 [`reposage/composition.py`](reposage/composition.py)，配置在 [`reposage/config.py`](reposage/config.py)，FastAPI 注入在 [`reposage/api/dependencies.py`](reposage/api/dependencies.py)。这些后端都藏在 `reposage/retrieval/protocols.py` 的几个 `Protocol` 背后，换一个不影响调用方。
+
+## go-hnsw 服务与冷启动
+
+`go-hnsw` 是内存索引，没有自己的持久化（Phase 5 才上 mmap），所以每次启动靠 **从 SQLite `embeddings` 表流式重建**：
+
+```mermaid
+flowchart LR
+  Boot["server 启动"] --> Idx["创建空 hnsw.Index"]
+  DB[("SQLite embeddings<br/>(向量真身)")] -->|"流式读 (chunk_id, vector)<br/>逐条 Add"| Idx
+  Idx --> Bind["绑定 gRPC 端口"]
+  Bind --> Serve["服务 Search / Add / BulkLoad / Stats"]
+  Py["Python RetrievalService"] <-->|"gRPC"| Serve
+  Serve -. "Search 只返回 (chunk_id, distance)" .-> Py
+```
+
+冷启动是 `O(N)` 读 float32 BLOB（10k 向量 <100ms，200k 约 2s）。`Stats` 暴露 `(size, dim, model, M, efC, efSearch)`，让 Python 端在维度/模型不匹配时快速失败。算法核心（插入 Alg 1、搜索 Alg 5）在 [`go-hnsw/insert.go`](go-hnsw/insert.go) / [`search.go`](go-hnsw/search.go)，gRPC 服务在 [`go-hnsw/internal/grpcserver/`](go-hnsw/internal/grpcserver)，冷启动加载在 `sqlite_load.go`。
+
+> mmap 快照（`Snapshot`/`Recover`）目前是 Phase 5 规划，[`go-hnsw/persist.go`](go-hnsw/persist.go) 暂返回 `errPersistNotImplemented`。
+
 ## 有什么新东西
 
 | 亮点 | 说明 |
