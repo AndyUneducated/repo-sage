@@ -10,9 +10,9 @@
 | 1 | 索引器 v1：tree-sitter + 符号图 | 1.0 周 | `reposage index <repo>` 写入 SQLite；对 10 kLOC 夹具可回答「X 在哪里被调用」。 |
 | 2 | 检索 v1：端到端混合 RAG | 1.5 周 | `/ask` 返回带引用的答案；HNSW + BM25 + RRF + 重排序器已接通；小仓库上 P50 延迟 < 1.5 s。 |
 | 3 | GraphRAG（Leiden + 摘要） | 1.5 周 | 可回答模块级问题；200 题基准中前 50 题上线；相对混合基线有 +X% 提升。 |
-| 4 | GitHub App | 1.0 周 | 在公开 OSS 仓库上线；@ 提及 → 30 秒内带引用的 PR 评论。 |
-| 5 | go-hnsw v2：持久化 + 基准测试 | 1.5 周 | mmap 快照；SIFT-1M Pareto 曲线写入 `docs/BENCHMARKS.md`，与 Faiss 对比。 |
-| 6 | 加固：评测门禁、OTel、性能 | 1.0 周 | Eval-gate 工作流拦截回归；完整 200 题基准；OTel 链路可观测。 |
+| 4 | go-hnsw v2：持久化 + 基准测试 | 1.5 周 | mmap 快照；SIFT-1M Pareto 曲线写入 `docs/BENCHMARKS.md`，与 Faiss 对比。 |
+| 5 | 加固：评测门禁、OTel、性能 | 1.0 周 | Eval-gate 工作流拦截回归；完整 200 题基准；OTel 链路可观测。 |
+| 6 | GitHub App | 1.0 周 | 在已加固的引擎上对外上线；@ 提及 → 30 秒内带引用的 PR 评论。 |
 | 7 | 延伸：Tantivy / TS+Go 语法 | 灵活 | 替换 BM25；在真实多语言仓库上做多语言索引；博客初稿。 |
 
 各阶段的依赖关系（哪些必须先做、哪些可以并行）：
@@ -22,15 +22,14 @@ flowchart LR
   P0["Phase 0<br/>骨架 + CI"] --> P1["Phase 1<br/>索引器"]
   P1 --> P2["Phase 2<br/>混合检索"]
   P2 --> P3["Phase 3<br/>GraphRAG"]
-  P2 --> P4["Phase 4<br/>GitHub App"]
-  P2 --> P5["Phase 5<br/>go-hnsw v2"]
-  P3 --> P6["Phase 6<br/>加固 + 评测门禁"]
-  P4 --> P6
-  P5 --> P6
+  P2 --> P4["Phase 4<br/>go-hnsw v2"]
+  P3 --> P5["Phase 5<br/>加固 + 评测门禁"]
+  P4 --> P5
+  P5 --> P6["Phase 6<br/>GitHub App"]
   P6 --> P7["Phase 7<br/>延伸目标"]
 ```
 
-> Phase 3 / 4 / 5 都只依赖 Phase 2，理论上可并行推进；Phase 6 把三者收口。
+> Phase 3 / 4 都只依赖 Phase 2，理论上可并行推进；Phase 5 把两者收口加固，随后 Phase 6 才在已加固的引擎上对外部署，最后是 Phase 7 延伸（其增量重索引 / 缓存层依赖 Phase 6 搭起的 `push` 管道）。
 
 ---
 
@@ -97,23 +96,7 @@ flowchart LR
 
 ---
 
-## 阶段 4 — GitHub App 部署
-
-**目标**：真实用户（先是我们，再是任何人）能在公开仓库安装 RepoSage。
-
-* GitHub App 注册；私钥与 webhook secret 放在 `.env`。
-* HMAC 校验 + JWT 签发 + installation token 缓存。
-* `@reposage` 命令解析；评论线程生命周期。
-* Webhook 处理器转发到现有 `/ask` 流程。
-* Markdown 引用渲染，含永久链接（`#L42-L57`）。
-* 由 `push` 事件触发的长时间索引任务。
-
-**演示**：在公开 OSS 仓库安装，开 PR，评论 `@reposage where does the request enter routing?`，30 秒内收到带引用的回复。
-**退出指标**：演示仓库往返 P95 < 30 s；签名校验通过；限流处理已测。
-
----
-
-## 阶段 5 — go-hnsw v2：持久化 + SIFT-1M 基准
+## 阶段 4 — go-hnsw v2：持久化 + SIFT-1M 基准
 
 **目标**：把 HNSW 模块从「内存能用」做成可严肃对标、可基准测试的产物。
 
@@ -130,7 +113,7 @@ flowchart LR
 
 ---
 
-## 阶段 6 — 加固：评测门禁、OTel、性能
+## 阶段 5 — 加固：评测门禁、OTel、性能
 
 **目标**：每次变更在合并前都有度量。
 
@@ -142,6 +125,22 @@ flowchart LR
 
 **演示**：开一个拉低检索 recall 的 PR；eval-gate 将其拦截。
 **退出指标**：eval-gate 运行 < 10 分钟；4 核笔记本上 P99 索引吞吐 ≥ 1k chunks/s。
+
+---
+
+## 阶段 6 — GitHub App 部署
+
+**目标**：真实用户（先是我们，再是任何人）能在公开仓库安装 RepoSage。放在加固之后，确保对外开放时 OTel 可观测、eval-gate 与性能调优均已就位，且可复用 Phase 4 的快照实现快速重载。
+
+* GitHub App 注册；私钥与 webhook secret 放在 `.env`。
+* HMAC 校验 + JWT 签发 + installation token 缓存。
+* `@reposage` 命令解析；评论线程生命周期。
+* Webhook 处理器转发到现有 `/ask` 流程。
+* Markdown 引用渲染，含永久链接（`#L42-L57`）。
+* 由 `push` 事件触发的长时间索引任务。
+
+**演示**：在公开 OSS 仓库安装，开 PR，评论 `@reposage where does the request enter routing?`，30 秒内收到带引用的回复。
+**退出指标**：演示仓库往返 P95 < 30 s；签名校验通过；限流处理已测。
 
 ---
 

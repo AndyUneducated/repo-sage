@@ -142,6 +142,39 @@ flowchart LR
 - **SQLite symbol graph** —— 确定性事实查询的来源；完整 schema 见 [`docs/INDEX_SCHEMA.md`](docs/INDEX_SCHEMA.md)。
 - **Community summaries** —— 模块级归纳问题（community 路径）的来源。
 
+这些产物建好后，在线三路检索各取所需——下面这张图说明 **哪条路径会读哪些索引产物**（实线 = 该路径检索时必读；虚线 = 拿到 `chunk_id` 后回 SQLite hydrate 文本）：
+
+```mermaid
+flowchart LR
+  subgraph Routes["在线检索三路"]
+    direction TB
+    Rg["graph 路径<br/>确定性事实查询 · 无 LLM"]
+    Rh["hybrid 路径<br/>语义检索（兜底主力）"]
+    Rc["community 路径<br/>模块级归纳"]
+  end
+
+  subgraph Artifacts["索引产物"]
+    direction TB
+    HN[("go-hnsw<br/>稠密向量")]
+    BM[("BM25<br/>稀疏词频")]
+    SG[("SQLite · nodes/edges<br/>符号图邻接表")]
+    CH[("SQLite · chunks<br/>文本 · path · 行号")]
+    SU[("SQLite · communities<br/>社区摘要")]
+  end
+
+  Rg -->|"按 FQN 查邻接表"| SG
+  Rg -. "回表取定义/引用片段" .-> CH
+
+  Rh -->|"向量近邻 top-50"| HN
+  Rh -->|"BM25 召回 top-50"| BM
+  Rh -. "RRF 后回表 hydrate + reranker" .-> CH
+
+  Rc -->|"取相关社区摘要"| SU
+  Rc -. "可下钻到成员 chunk" .-> CH
+```
+
+一句话对照：**graph 读符号图、hybrid 读向量+BM25、community 读社区摘要**；三路最后都要回 `chunks` 表取真正的文本与 `file:line`，这也是为什么 SQLite 是落盘"真身"、其余产物本质上是它的索引视图。
+
 > 索引流水线的长文版本见 [`docs/ARCHITECTURE.md` 第 3 节](docs/ARCHITECTURE.md)；索引落库的字段定义见 [`docs/INDEX_SCHEMA.md`](docs/INDEX_SCHEMA.md)。
 
 ### 深入：两遍符号解析（Symbol Graph resolution）
