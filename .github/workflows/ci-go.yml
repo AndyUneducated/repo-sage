@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
           cache: true
           cache-dependency-path: go-hnsw/go.sum
 
@@ -50,7 +50,9 @@ jobs:
           go build -o bin/hnsw-bench ./cmd/bench
 
       - name: Test (-race)
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        # Only packages with *_test.go files: ./... + -coverprofile fails on
+        # zero-test packages (cmd/*, hnswpb, …) with "no such tool covdata".
+        run: go test -race -count=1 -coverprofile=coverage.out $(go list -f '{{if .TestGoFiles}}{{.ImportPath}}{{end}}' ./...)
 
       - name: Smoke-boot the server
         run: |
