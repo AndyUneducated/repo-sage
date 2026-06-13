@@ -89,7 +89,7 @@ For `graph`-routed questions we never call the embedder. We resolve the named sy
 For semantic questions we run two retrievers in parallel:
 
 * **Dense**: `go-hnsw` with `M=16, efConstruction=200, efSearch=64` (Malkov & Yashunin 2018 defaults).
-* **Sparse**: BM25 over code tokens (rank-bm25 in Phase 2; Tantivy in Phase 5).
+* **Sparse**: BM25 over code tokens (rank-bm25 in Phase 2; Tantivy in Phase 7).
 
 Both branches return their top-50 candidates, which are fused with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (`k=60`, the original paper's default). RRF is score-scale invariant — we do not need to normalise BM25 scores against cosine similarity. The fused top-20 then goes through `bge-reranker-v2-m3` for cross-encoder rescoring; the resulting top-8 is handed to the LLM.
 
@@ -108,8 +108,8 @@ The funnel narrows at each stage — `50 + 50 → 20 → 8` — so the expensive
 The Phase 2 plumbing is mediated by four `Protocol`s
 (`SparseRetriever`, `DenseRetriever`, `Reranker`, `LLMClient`) in
 [`reposage/retrieval/protocols.py`](../reposage/retrieval/protocols.py).
-This is the swap point for Phase 5 mmap HNSW, Phase 7 Tantivy, and
-Phase 8 sharding — no caller of `RetrievalService` changes.
+This is the swap point for Phase 4 mmap HNSW, Phase 7 Tantivy, and
+sharding — no caller of `RetrievalService` changes.
 
 ### 4.4 Citations and grounding
 Every chunk we hand to the LLM carries `(repo, path, start_line, end_line)`. The system prompt forbids citing anything that is not present in the context. A post-generation `verify_grounding` check (see [`reposage/llm/grounding.py`](../reposage/llm/grounding.py)) parses each `[path:lo-hi]` reference and confirms it is fully contained inside one of the retrieved chunks. If any citation is fabricated we regenerate the answer once with the offending references explicitly forbidden (DD-013); if the second attempt also fails, we strip the bad citations and return the cleaned answer marked `grounded=False`. The two-strikes ceiling is a deliberate cost guard.
@@ -131,24 +131,37 @@ flowchart LR
     Idx["HNSW Index<br/>(in-memory)"]
   end
   DB[(SQLite<br/>embeddings)]
+  Snap[(index.hnsw<br/>mmap snapshot)]
   Pipe -->|write vectors| DB
-  DB -.->|cold start: stream + Add| Idx
+  Snap ==>|"boot: mmap Recover (fast)"| Idx
+  DB -.->|"fallback: stream + Add"| Idx
+  Idx -.->|"snapshot on exit"| Snap
   Ret <-->|"gRPC: Add / Search / Stats"| Idx
 ```
 
 * **Algorithm**: from-scratch implementation of Malkov & Yashunin (2018)
-  Algorithms 1 (insert) + 5 (search), with a min/max-heap candidate set
-  in `internal/heap/`. Phase 2 is single-threaded; Phase 6 swaps in
-  per-layer `RWMutex`.
+  Algorithms 1 (insert) + 4 (heuristic neighbour selection, Phase 4) + 5
+  (search), with a min/max-heap candidate set in `internal/heap/`. Insert is
+  single-writer; Phase 5 swaps in per-layer `RWMutex` for concurrent reads.
 * **Transport**: gRPC service defined in [`proto/hnsw.proto`](../proto/hnsw.proto).
-  The Phase 2 surface is `Add`, `BulkLoad`, `Search`, and `Stats`.
+  The surface is `Add`, `BulkLoad`, `Search`, and `Stats`.
   `Stats` exposes `(size, dim, model, M, efConstruction, efSearch)` so
   the Python client can fail fast on mismatch.
-* **Cold start**: at boot the server reads `embeddings WHERE model = ?`
-  out of the SQLite index and `Add`s every row; 34 vectors take ~2 ms,
-  10 k take ~150 ms. Phase 5 will replace this with an mmap'd snapshot.
-* **Bench**: `cmd/bench` writes a CSV row per `(M, efC, ef)` for the SIFT-1M
-  curve we plot in `docs/BENCHMARKS.md` (Phase 5 lands the dataset loader).
+* **Persistence (Phase 4)**: `Index.Snapshot(path)` writes an mmap-friendly
+  image atomically (`tmp + fsync + rename`) — a fixed header, columnar ids, a
+  CSR adjacency (layer-0 contiguous for search cache-locality), and a 64-byte
+  aligned float32 vector arena at the tail. `hnsw.Recover(path)` mmaps the file
+  and aliases the big arrays zero-copy, so reloading a 1M × 128 index is `O(parse
+  small arrays)` rather than an O(n) re-insert. See
+  [`docs/plans/phase-4-hnsw-v2.md`](plans/phase-4-hnsw-v2.md) for the byte layout.
+* **Cold start**: with a snapshot configured the server `Recover`s it on boot
+  (the fast path); otherwise it falls back to streaming `embeddings WHERE model
+  = ?` out of SQLite and `Add`-ing every row, then writes an initial snapshot.
+* **Bench**: `cmd/bench` runs the SIFT-1M sweep (or a synthetic stand-in),
+  writing a CSV row per `(M, efC, efSearch)` with recall@10 / QPS / P50 / P99 /
+  build / RSS / recover-P50. [`benchmarks/sift1m/run_sweep.py`](../benchmarks/sift1m/run_sweep.py)
+  drives the grid, overlays a Faiss baseline, and plots the Pareto curve into
+  `docs/BENCHMARKS.md`.
 
 ## 6. Observability
 

@@ -23,7 +23,7 @@ When a new decision changes an existing one:
 
 The single-line view of the decisions that describe the system as it is **today**. Anything not listed here is either superseded (search by id) or still proposed.
 
-- DD-001 Self-built Go HNSW — implemented (Phase 2 / 5)
+- DD-001 Self-built Go HNSW — implemented (Phase 2 / 4)
 - DD-002 Dual-index retrieval (graph + community + hybrid) — active (Phase 2/3)
 - DD-003 Communities on call topology, not directories — active (Phase 3)
 - DD-004 SQLite for the symbol graph — implemented (Phase 1)
@@ -42,12 +42,16 @@ The single-line view of the decisions that describe the system as it is **today*
 - DD-019 Community-route defaults favour breadth — active (Phase 3)
 - DD-024 Single composition root + `REPOSAGE_PROFILE` — active (Phase 3.5 refactor)
 - DD-025 `AnswerResult.outcome: RouteOutcome` replaces `route: str` — active (Phase 3.5 refactor)
+- DD-026 mmap snapshot + columnar/lazy ids — implemented (Phase 4)
+- DD-027 Algorithm 4 heuristic neighbour selection — implemented (Phase 4)
+- DD-028 Atomic snapshot writes (tmp + fsync + rename) — implemented (Phase 4)
+- DD-029 Snapshot via server lifecycle, not a gRPC RPC (for now) — active (Phase 4)
 
 ## DD-001: Self-built HNSW in Go (instead of `hnswlib` / Faiss)
 
 - **Status**: implemented
-- **Phase**: 2 (Go server) / 5 (mmap arena, planned)
-- **Last reviewed**: 2026-05-25
+- **Phase**: 2 (Go server) / 4 (mmap arena)
+- **Last reviewed**: 2026-06-12
 - **Superseded-by**: —
 
 * **Choice**: implement HNSW from scratch in Go (`go-hnsw/`), exposed to the Python service over gRPC.
@@ -383,3 +387,57 @@ The single-line view of the decisions that describe the system as it is **today*
   - The HTTP response field renames from `route: str` to `outcome: { route, degraded_from, degrade_reason }`. Any existing dashboard that joins on `route` must update. Acceptable because the repo has no published API consumers yet.
   - One extra dataclass (`RouteOutcome`) and one extra Pydantic model (`Outcome`) per response.
 * **Reversal cost**: low. The dispatch shape is independent of the seams (DD-012); flattening `outcome.route` back into `AnswerResult.route` is mechanical if we ever decide structured degradation is overkill.
+
+## DD-026: mmap snapshot with a zero-copy vector arena and columnar/lazy ids
+
+- **Status**: implemented
+- **Phase**: 4
+- **Last reviewed**: 2026-06-12
+- **Superseded-by**: —
+
+* **Choice**: `hnsw.Recover` mmaps the snapshot and aliases the large arrays (the float32 vector arena, the layer-0 CSR `adj0`, the upper-layer blob `adjU`) straight out of the mapping; only the small offset/level arrays are copied. Node ids are stored **columnar** (`idData` bytes + `idOff` offsets) and materialised lazily — a search hit calls `string(idData[idOff[i]:idOff[i+1]])`, so we never build n strings up front. The `idIndex` (id→internal) map is left nil after Recover and rebuilt lazily only if an `Add` arrives. A recovered index is **frozen** (read-only mmap); the first mutation `thaw`s it by copying the aliased regions into owned memory and unmapping.
+* **Alternatives**:
+  - Eagerly read the whole file with `os.ReadFile` and parse into normal slices. Simple, but copying a 512 MB vector arena (1M × 128) blows the `< 200 ms` reload budget on its own.
+  - mmap but eagerly build all n node structs, ids, and the id map. The per-node allocations (≈ 1M slice headers + 1M strings + 1M map inserts) dominate and again threaten the budget.
+* **Why**: the Phase 4 exit metric is "reload 1M × 128 with P50 `< 200 ms`". The vector arena is the overwhelming cost; mmap lets the kernel page it in lazily so `Recover` does `O(parse small arrays)` work and returns near-instantly. Columnar/lazy ids and the lazy id map remove the only remaining O(n) per-node costs from the serving path (which is recover-then-Search, never recover-then-Add).
+* **Cost we accept**: a recovered index is read-only until thawed; the rare "recover then write" path pays a one-time deep copy. `unsafe` aliasing assumes a little-endian host (asserted at package init) and requires 3-index slicing so a stray `append` cannot write into the read-only mapping.
+* **Reversal cost**: low-medium. The format is versioned (`version=2`); falling back to eager reads is a localised change in `persist.go` if mmap ever becomes a liability.
+
+## DD-027: Algorithm 4 heuristic neighbour selection (default on)
+
+- **Status**: implemented
+- **Phase**: 4
+- **Last reviewed**: 2026-06-12
+- **Superseded-by**: —
+
+* **Choice**: select neighbours with the paper's Algorithm 4 (SELECT-NEIGHBORS-HEURISTIC) — keep a candidate only if it is closer to the query than to any already-selected neighbour, with `keepPrunedConnections=true` to refill to M. Both the insert path and reverse-edge trimming use it. `Config.Heuristic` defaults true; the Phase 2 simple selection (Algorithm 3, closest-M) is retained behind `Heuristic=false` for comparison and as a fallback.
+* **Alternatives**: keep the simple closest-M selection (what Phase 2 shipped). Cheaper per insert, but it packs near-duplicate edges in clustered regions and gives lower recall at a fixed efSearch.
+* **Why**: the heuristic produces an RNG-style (relative neighbourhood graph) pruning — diverse long/short edges — which is what `hnswlib` ships by default and what lifts recall on clustered data like SIFT. Better recall-vs-QPS is exactly the Pareto deliverable.
+* **Cost we accept**: a modest constant-factor increase in build time (extra candidate-to-selected distance checks, bounded by the `ef`-sized candidate set).
+* **Reversal cost**: trivial — flip `Config.Heuristic`.
+
+## DD-028: Atomic snapshot writes (tmp + fsync + rename)
+
+- **Status**: implemented
+- **Phase**: 4
+- **Last reviewed**: 2026-06-12
+- **Superseded-by**: —
+
+* **Choice**: `Snapshot` streams the full image to `path + ".tmp"`, `fsync`s it, then `os.Rename`s over `path`. The rename is indirected through a package var so tests can simulate a failed commit and assert the previous snapshot survives.
+* **Alternatives**: write in place over the live file. A crash mid-write would leave a half-written, unrecoverable snapshot — worse than having no snapshot.
+* **Why**: POSIX `rename` within a directory is atomic, so a reader either sees the entire old file or the entire new one. Crash safety beats the marginal cost of a temp file and one extra fsync.
+* **Cost we accept**: transient 2× disk for the snapshot during the write; a stale `.tmp` orphan if the process dies between write and rename (cleaned up on the next Snapshot).
+* **Reversal cost**: trivial.
+
+## DD-029: Snapshot via server lifecycle, not a gRPC RPC (for now)
+
+- **Status**: active
+- **Phase**: 4
+- **Last reviewed**: 2026-06-12
+- **Superseded-by**: —
+
+* **Choice**: expose snapshot/recover through the `hnsw-server` process lifecycle (`--snapshot` recovers on boot and writes an initial snapshot after a cold SQLite load; `--snapshot-on-exit` persists on graceful shutdown) rather than adding a `Snapshot` gRPC method. `proto/hnsw.proto` is unchanged.
+* **Alternatives**: add `rpc Snapshot(...)` to the proto. Cleaner trigger from the Python indexer, but the dev/CI environment lacks `protoc-gen-go` / `protoc-gen-go-grpc`, so regenerating the Go + Python stubs by hand is fragile and out of scope for Phase 4.
+* **Why**: the roadmap's Phase 4 deliverables (mmap snapshot/restore, atomic writes, fast reload, bench) are fully satisfied at the lifecycle level. Keeping the proto frozen means the Python `hnsw_client.py` needs zero changes.
+* **Cost we accept**: no on-demand snapshot trigger from a running server until the RPC is added; snapshots happen at boot/exit only.
+* **Reversal cost**: low. Adding the RPC later is additive — the existing surface and the Python client are unaffected.

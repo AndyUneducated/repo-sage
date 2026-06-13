@@ -1,9 +1,11 @@
-// Phase 2 gRPC contract for the in-house HNSW vector store.
+// gRPC contract for the in-house HNSW vector store.
 //
 // We deliberately keep this minimal: Add, Search, Stats. BulkLoad is a
 // streaming convenience the Python indexer uses on cold start and after a
-// `force` rebuild. Phase 5 will add Snapshot/Recover; Phase 6 will turn
-// Search into a server-streaming RPC for batched queries.
+// `force` rebuild. Phase 4 mmap snapshot/recover is managed at the server
+// process lifecycle (recover-on-boot, snapshot-on-exit) rather than via an
+// RPC, so this surface is unchanged; a Snapshot RPC may be added later. A
+// future phase may turn Search into a server-streaming RPC for batched queries.
 syntax = "proto3";
 
 package reposage.hnsw.v1;

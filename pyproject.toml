@@ -60,6 +60,12 @@ eval = [
     "datasets>=2.20",
     "pandas>=2.2",
 ]
+bench = [
+    # Phase 4 SIFT-1M sweep: Faiss baseline + Pareto plotting. Kept out of the
+    # default install so the core service does not carry the faiss wheel.
+    "faiss-cpu>=1.8",
+    "matplotlib>=3.8",
+]
 
 [project.scripts]
 reposage = "reposage.cli:app"

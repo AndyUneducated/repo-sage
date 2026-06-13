@@ -6,14 +6,34 @@ This file is the single source of truth for any number we publish about RepoSage
 
 * Dataset: SIFT-1M (1M × 128-d, 10k queries, ground-truth top-100, L2 metric).
 * Configuration sweep: `M ∈ {8, 16, 32}` × `efC ∈ {100, 200, 400}` × `efSearch ∈ {16, 32, 64, 128, 256}`.
-* Hardware: documented per row in `benchmarks/sift1m/results/<timestamp>.csv`.
+* Single thread for both indexes; one query per `Search` call so the P50 / P99 reflect real per-query latency, not batch throughput.
+* Recover P50 is the median of N reloads of the mmap snapshot — the Phase 4 exit metric (`< 200 ms` for 1M × 128).
+* Hardware: documented per row in `benchmarks/sift1m/results/<date>-sift-sweep.csv`.
 
-| Index | M | efC | efSearch | Recall@10 | QPS (1 thread) | P50 (ms) | P99 (ms) | Build (s) | RSS (MB) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| go-hnsw | — | — | — | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| faiss | 16 | 200 | 64 | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+Reproduce:
 
-> Filled in during Phase 5. The deliverable is the Pareto curve (recall@10 vs QPS) on the same hardware, plus an honest write-up of where go-hnsw lands relative to Faiss and why.
+```bash
+make hnsw-build
+bash benchmarks/sift1m/fetch_sift1m.sh                 # ~1 GB, not committed
+pip install -e ".[bench]"                              # faiss-cpu + matplotlib
+python benchmarks/sift1m/run_sweep.py \
+  --dataset-dir benchmarks/sift1m/data/sift \
+  --snapshot benchmarks/sift1m/data/index.hnsw --faiss --write-docs
+```
+
+The table and plot below are regenerated in place by `run_sweep.py --write-docs`
+(it rewrites everything between the two HTML markers). The deliverable is the
+Pareto curve (recall@10 vs QPS) on the same hardware, plus an honest write-up of
+where go-hnsw lands relative to Faiss and why.
+
+<!-- SIFT_TABLE_START -->
+
+| Index | M | efC | efSearch | Recall@10 | QPS (1 thread) | P50 (ms) | P99 (ms) | Build (s) | RSS (MB) | Recover P50 (ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| go-hnsw | — | — | — | _pending sweep run_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| faiss | — | — | — | _pending sweep run_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | n/a |
+
+<!-- SIFT_TABLE_END -->
 
 ## 2. Cross-File QA benchmark — 200 questions
 

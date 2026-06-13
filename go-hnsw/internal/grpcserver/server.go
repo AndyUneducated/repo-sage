@@ -38,6 +38,28 @@ func New(cfg hnsw.Config, model string) (*Server, error) {
 	return &Server{index: ix, cfg: cfg, model: model}, nil
 }
 
+// NewWithIndex wraps an already-built index, e.g. one returned by
+// hnsw.Recover. The caller's cfg (from server flags) is used for the Stats
+// contract and dim validation; it must agree with how the snapshot was built.
+func NewWithIndex(ix *hnsw.Index, cfg hnsw.Config, model string) *Server {
+	return &Server{index: ix, cfg: cfg, model: model}
+}
+
+// Snapshot persists the current index to path atomically (tmp + fsync +
+// rename). Used by the boot/exit lifecycle in cmd/server.
+func (s *Server) Snapshot(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.index.Snapshot(path)
+}
+
+// Close releases the index (and its mmap if recovered).
+func (s *Server) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.index.Close()
+}
+
 // Add inserts or replaces a vector under the given id. The server holds a
 // single mutex around the index because Phase 2 ships a single-writer/
 // single-reader index; Phase 6 will shard or use per-layer RWMutex.

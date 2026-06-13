@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     hnsw_m: int = 16
     hnsw_ef_construction: int = 200
     hnsw_ef_search: int = 64
+    # Phase 4 mmap snapshot. None -> the server cold-loads from SQLite; set to
+    # a path to recover-on-boot and snapshot-on-exit (defaults under
+    # hnsw_data_dir when enabled by the launcher).
+    hnsw_snapshot_path: Path | None = None
 
     # ---- GitHub App ----
     github_app_id: str | None = None

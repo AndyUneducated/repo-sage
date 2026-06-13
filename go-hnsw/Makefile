@@ -18,8 +18,9 @@ lint:
 fmt:
 	gofmt -w .
 
-bench:
-	$(GO) run ./cmd/bench --dataset=sift1m --M=16 --efC=200 --ef=64
+bench: build
+	$(BIN_DIR)/hnsw-bench --synthetic 20000 --M 16 --efC 200 --ef 16,64,128,256 \
+		--snapshot /tmp/hnsw-bench.hnsw --header
 
 clean:
 	rm -rf $(BIN_DIR)

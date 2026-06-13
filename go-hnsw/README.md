@@ -35,32 +35,52 @@ flowchart TD
 | --- | --- |
 | 2 | In-memory `Index` with insert / search, cosine + L2 distances |
 | 2 | gRPC server (`cmd/server`) consumed by the Python retriever |
-| 5 | `mmap` persistence (snapshot + recover) |
-| 5 | SIFT-1M benchmark vs Faiss; tuning curves over `M` × `ef` |
-| 6 | Concurrency (sharded read locks, lock-free search path) |
+| 4 | Algorithm 4 heuristic neighbour selection (diverse edges, higher recall) |
+| 4 | `mmap` persistence — atomic `Snapshot` + zero-copy `Recover` |
+| 4 | SIFT-1M benchmark vs Faiss; Pareto curve over `M` × `efC` × `efSearch` |
+| 5 | Concurrency (per-layer read locks, lock-free search path) |
 
 ## Layout
 
 ```
 go-hnsw/
-├── hnsw.go         # public API (Index, Config)
-├── graph.go        # multi-layer graph + neighbour selection (heuristic)
-├── insert.go       # insertion algorithm (Algorithm 1 in the paper)
-├── search.go       # greedy search + ef-bounded beam (Algorithm 2 / 5)
-├── distance.go     # cosine, L2, inner product
-├── persist.go      # mmap snapshot / recover
+├── hnsw.go         # public API (Index, Config, Snapshot/Recover/Close)
+├── graph.go        # multi-layer graph; columnar ids; frozen/thaw
+├── insert.go       # insertion (Algorithm 1) + neighbour selection (3 / 4)
+├── search.go       # greedy search + ef-bounded beam (Algorithm 5)
+├── distance.go     # cosine, L2, inner product + Metric enum
+├── persist.go      # mmap snapshot / recover (CSR + atomic tmp+rename)
+├── bytesconv.go    # zero-copy []byte <-> []float32 / []uint32 (little-endian)
+├── mmap_unix.go    # mmap/munmap (unix); mmap_other.go reads into memory
 ├── stats.go        # per-op counters
 ├── cmd/
-│   ├── server/     # gRPC server consumed by reposage.retrieval.hnsw_client
+│   ├── server/     # gRPC server; recover-on-boot, snapshot-on-exit
 │   └── bench/      # SIFT-1M benchmark CLI (writes CSV for plotting)
-└── internal/heap/  # bounded min/max heaps used in the candidate set
+└── internal/
+    ├── heap/       # bounded min/max heaps used in the candidate set
+    ├── grpcserver/ # gRPC façade over Index
+    └── bench/      # dataset IO (.fvecs/.ivecs), recall, build/query runner
 ```
+
+## Persistence
+
+```go
+ix.Snapshot("index.hnsw")          // atomic: tmp + fsync + rename
+rec, _ := hnsw.Recover("index.hnsw") // mmap; vectors page in lazily
+defer rec.Close()                   // munmap
+```
+
+The on-disk format (header → columnar ids → CSR adjacency → 64-byte-aligned
+vector arena) is documented in
+[`docs/plans/phase-4-hnsw-v2.md`](../docs/plans/phase-4-hnsw-v2.md). Recover is
+`O(parse small arrays)`: the multi-hundred-MB vector arena is mmap'd and paged
+in lazily by the kernel, never copied.
 
 ## Local development
 
 ```bash
 make build       # build cmd/server, cmd/bench
-make test        # go test ./...
+make test        # go test -race ./...
 make lint        # gofmt -l + go vet
-make bench       # SIFT-1M benchmark (downloads dataset on first run)
+make bench       # synthetic smoke benchmark (no dataset download)
 ```

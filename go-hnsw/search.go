@@ -50,7 +50,7 @@ func (g *graph) search(query []float32, topK, efSearch int) []Result {
 	}
 	out := make([]Result, len(items))
 	for i, it := range items {
-		out[i] = Result{ID: g.nodes[it.ID].id, Distance: it.Dist}
+		out[i] = Result{ID: g.nodeID(it.ID), Distance: it.Dist}
 	}
 	return out
 }

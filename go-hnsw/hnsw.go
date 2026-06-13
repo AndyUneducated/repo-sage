@@ -27,11 +27,14 @@ type Config struct {
 	EfConstruction int          // candidate list size during insert
 	EfSearch       int          // candidate list size during search (override-able per query)
 	LevelMult      float64      // 1 / ln(M); controls layer assignment
-	Distance       DistanceFunc // defaults to cosine
+	Distance       DistanceFunc // resolved from Metric when nil
+	Metric         Metric       // serialised into snapshots; 0 = cosine
+	Heuristic      bool         // Algorithm 4 neighbour selection (vs. Algorithm 3 simple)
 	Seed           int64
 }
 
 // DefaultConfig returns reasonable defaults for a given dimensionality.
+// Phase 4 turns on the Algorithm 4 heuristic by default (DD-027).
 func DefaultConfig(dim int) Config {
 	return Config{
 		Dim:            dim,
@@ -41,15 +44,19 @@ func DefaultConfig(dim int) Config {
 		EfSearch:       64,
 		LevelMult:      0, // 0 → derived from M at construction
 		Distance:       Cosine,
+		Metric:         MetricCosine,
+		Heuristic:      true,
 		Seed:           1337,
 	}
 }
 
 // Index is the public handle.
 type Index struct {
-	cfg   Config
-	mu    sync.RWMutex
-	graph *graph
+	cfg    Config
+	mu     sync.RWMutex
+	graph  *graph
+	mmap   []byte // non-nil while a recovered snapshot is mapped; freed by Close
+	closed bool
 }
 
 // New creates an empty index with the supplied config.
@@ -63,21 +70,64 @@ func New(cfg Config) (*Index, error) {
 	if cfg.EfConstruction <= 0 {
 		return nil, errors.New("hnsw: EfConstruction must be > 0")
 	}
+	// Distance takes precedence when set explicitly (legacy callers); otherwise
+	// resolve it from Metric so snapshots reload with the right function.
 	if cfg.Distance == nil {
-		cfg.Distance = Cosine
+		cfg.Distance = cfg.Metric.Func()
 	}
 	return &Index{cfg: cfg, graph: newGraph(cfg)}, nil
 }
 
-// Add inserts (or replaces) a vector with a stable string id.
+// Add inserts (or replaces) a vector with a stable string id. If this index
+// was produced by Recover (frozen, vectors aliasing a read-only mmap), the
+// first Add thaws it into owned memory first so the mutation is safe.
 func (ix *Index) Add(id string, vec []float32) error {
 	if len(vec) != ix.cfg.Dim {
 		return errors.New("hnsw: vector dimension mismatch")
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	if ix.closed {
+		return errClosed
+	}
+	if ix.graph.frozen {
+		ix.thawLocked()
+	}
 	return ix.graph.insert(id, vec)
 }
+
+// thawLocked copies the mmap-aliased vector arena and id bytes into owned
+// memory, unmaps the snapshot, and flips the graph back to mutable. Callers
+// must hold ix.mu. This is the rare "recover then write" path.
+func (ix *Index) thawLocked() {
+	ix.graph.thaw()
+	if ix.mmap != nil {
+		_ = munmap(ix.mmap)
+		ix.mmap = nil
+	}
+}
+
+// Close releases the memory-mapped snapshot, if any. It is safe to call on an
+// in-memory index (no-op) and idempotent. After Close the index must not be
+// used.
+func (ix *Index) Close() error {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.closed {
+		return nil
+	}
+	ix.closed = true
+	if ix.mmap != nil {
+		err := munmap(ix.mmap)
+		ix.mmap = nil
+		ix.graph = nil
+		return err
+	}
+	ix.graph = nil
+	return nil
+}
+
+var errClosed = errors.New("hnsw: index is closed")
 
 // Result is one search hit.
 type Result struct {
@@ -96,6 +146,9 @@ func (ix *Index) Search(query []float32, topK, efSearch int) ([]Result, error) {
 	}
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	if ix.closed {
+		return nil, errClosed
+	}
 	return ix.graph.search(query, topK, efSearch), nil
 }
 
@@ -103,5 +156,14 @@ func (ix *Index) Search(query []float32, topK, efSearch int) ([]Result, error) {
 func (ix *Index) Len() int {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	if ix.closed {
+		return 0
+	}
 	return ix.graph.size()
 }
+
+// Metric reports the distance metric the index was built with.
+func (ix *Index) Metric() Metric { return ix.cfg.Metric }
+
+// Dim reports the vector dimensionality.
+func (ix *Index) Dim() int { return ix.cfg.Dim }
