@@ -50,6 +50,11 @@ benchmarks/**/results/
 benchmarks/**/*.csv
 benchmarks/**/*.json
 !benchmarks/**/expected_*.json
+# Keep published Pareto plots tracked (the BENCHMARKS.md deliverable); raw CSVs
+# and the rest of results/ stay ignored.
+!benchmarks/sift1m/results/
+benchmarks/sift1m/results/*
+!benchmarks/sift1m/results/*-sift-pareto.png
 
 # --- IDE ---
 .idea/

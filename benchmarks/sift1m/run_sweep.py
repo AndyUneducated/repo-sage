@@ -129,15 +129,18 @@ def run_go_bench(args: argparse.Namespace) -> str:
 def run_faiss_baseline(args: argparse.Namespace) -> str:
     """Run the Faiss baseline script and return its CSV (no header)."""
     script = HERE / "faiss_baseline.py"
+    # faiss_baseline.py uses argparse `nargs="+"`, so each grid axis must be
+    # passed as separate space-separated tokens — NOT comma-joined (the Go
+    # bench accepts commas, faiss does not).
     cmd = [
         sys.executable,
         str(script),
         "--M",
-        ",".join(map(str, args.M)),
+        *map(str, args.M),
         "--efC",
-        ",".join(map(str, args.efC)),
+        *map(str, args.efC),
         "--ef",
-        ",".join(map(str, args.ef)),
+        *map(str, args.ef),
         "--topk",
         str(args.topk),
     ]
@@ -257,20 +260,47 @@ def main() -> None:
     parser.add_argument("--snapshot", default="", help="snapshot path to measure reload P50")
     parser.add_argument("--faiss", action="store_true", help="also run the Faiss baseline")
     parser.add_argument("--write-docs", action="store_true", help="refresh docs/BENCHMARKS.md")
+    parser.add_argument(
+        "--go-csv",
+        default="",
+        help="read go-hnsw rows from this CSV instead of running the bench (offline replot)",
+    )
+    parser.add_argument(
+        "--faiss-csv",
+        default="",
+        help="read Faiss rows from this CSV instead of running the baseline",
+    )
     args = parser.parse_args()
-
-    rows = parse_csv_text(run_go_bench(args))
-    if args.faiss:
-        rows += parse_csv_text("\n".join([",".join(COLUMNS), run_faiss_baseline(args)]))
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.date.today().isoformat()
     csv_path = RESULTS_DIR / f"{stamp}-sift-sweep.csv"
-    with csv_path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)  # type: ignore[arg-type]
-    print(f"wrote {csv_path} ({len(rows)} rows)", file=sys.stderr)
+
+    def persist(rows: list[dict[str, object]]) -> None:
+        """Write the combined CSV. Called after the (expensive) go run and again
+        after the Faiss baseline so a later failure can never discard results."""
+        with csv_path.open("w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)  # type: ignore[arg-type]
+        print(f"wrote {csv_path} ({len(rows)} rows)", file=sys.stderr)
+
+    if args.go_csv:
+        rows = parse_csv_text(Path(args.go_csv).read_text())
+    else:
+        rows = parse_csv_text(run_go_bench(args))
+    # Persist go-hnsw rows immediately — the build is the multi-hour part, so
+    # never let a downstream Faiss/plot error throw it away.
+    persist(rows)
+
+    if args.faiss or args.faiss_csv:
+        faiss_out = Path(args.faiss_csv).read_text() if args.faiss_csv else run_faiss_baseline(args)
+        # faiss_baseline emits headerless rows; prepend the shared columns
+        # unless the source already carries a header.
+        if not faiss_out.lstrip().startswith("index,"):
+            faiss_out = "\n".join([",".join(COLUMNS), faiss_out])
+        rows += parse_csv_text(faiss_out)
+        persist(rows)
 
     png_path = RESULTS_DIR / f"{stamp}-sift-pareto.png"
     png_rel = None
@@ -278,9 +308,15 @@ def main() -> None:
         png_rel = f"../../benchmarks/sift1m/results/{png_path.name}"
         print(f"wrote {png_path}", file=sys.stderr)
 
-    front = pareto_front(rows)
-    print("\n=== Pareto frontier (recall, qps) ===", file=sys.stderr)
-    for r in front:
+    # The published table shows each index's OWN recall-vs-QPS frontier, not the
+    # global one: when one library dominates (e.g. Faiss > go-hnsw on QPS) the
+    # global frontier would hide the loser entirely, defeating the comparison.
+    table_rows: list[dict[str, object]] = []
+    for idx in sorted({str(r["index"]) for r in rows}):
+        table_rows += pareto_front([r for r in rows if str(r["index"]) == idx])
+
+    print("\n=== per-index Pareto frontier (recall, qps) ===", file=sys.stderr)
+    for r in table_rows:
         print(
             f"  {r['index']:>8}  M={r['M']:<3} efC={r['efC']:<4} ef={r['efSearch']:<4} "
             f"recall={float(r['recall']):.4f}  qps={float(r['qps']):.0f}",
@@ -288,7 +324,7 @@ def main() -> None:
         )
 
     if args.write_docs:
-        write_benchmarks_md(markdown_table(front), png_rel)
+        write_benchmarks_md(markdown_table(table_rows), png_rel)
 
 
 if __name__ == "__main__":
