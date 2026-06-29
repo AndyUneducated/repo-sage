@@ -1,9 +1,44 @@
 # Phase 4 — go-hnsw v2：持久化（persistence，索引落盘后可秒级重载）+ SIFT-1M 基准（技术方案）
 
 > 本文档与 [`docs/ROADMAP.md`](../ROADMAP.md) 第 4 阶段对应。
-> 创建日期：2026-06-12。
+> 创建日期：2026-06-12。**完成日期：2026-06-29**（commit `28bc663`）。
 > 风格与 [docs/plans/phase-1-indexer.md](phase-1-indexer.md)、[docs/plans/phase-2-retrieval.md](phase-2-retrieval.md)、[docs/plans/phase-3-graphrag.md](phase-3-graphrag.md) 一致：专有名词括号注解。
 > 历史注记：早期源码注释把"持久化 / 基准"标为 Phase 5、把"并发"标为 Phase 6。路线图在 commit `6fa8fe1` 重排后，**持久化 + SIFT-1M 基准 = Phase 4**，**加固 + 并发 = Phase 5**。本方案以路线图为准，并顺手把过期注释改正。
+
+## 0. 完成状态（2026-06-29）
+
+| 交付物 | 状态 | 证据 |
+| --- | --- | --- |
+| mmap 快照 / Recover（CSR 格式） | ✅ | [`go-hnsw/persist.go`](../../go-hnsw/persist.go) |
+| Algorithm 4 启发式邻居选择 | ✅ | [`go-hnsw/insert.go`](../../go-hnsw/insert.go) |
+| 原子快照写入（tmp + fsync + rename） | ✅ | `persist_test.go` |
+| `cmd/bench` + `internal/bench` | ✅ | SIFT-1M / synthetic 双模式 |
+| `run_sweep.py` 扫描驱动 + Faiss 基线 | ✅ | [`benchmarks/sift1m/`](../../benchmarks/sift1m/) |
+| Pareto 曲线发布 | ✅ | [`docs/BENCHMARKS.md`](../BENCHMARKS.md) §1 |
+| 1M×128 快照重载 P50 < 200 ms | ✅ | **11.7–13.0 ms**（median of 5 reloads） |
+
+**SIFT-1M 首轮实测摘要**（缩减网格 `M∈{16,32}×efC∈{200,400}`，完整 1M base，Apple M4 单线程）：
+
+| 指标 | go-hnsw | Faiss-HNSWFlat | 说明 |
+| --- | --- | --- | --- |
+| Recall@10（最高配置） | 0.9992 | 0.9992 | 匹配 |
+| QPS @ ~0.99 recall | ~1.0–1.1k | ~2.7k | Faiss 领先 ~2.5–3×（SIMD + 调优搜索环） |
+| Build（M32/efC400） | 4105 s | 1034 s | 构建慢 ~4×；非 Phase 4 退出指标 |
+| Recover P50（1M×128） | 11.7–13.0 ms | n/a | **Phase 4 核心退出指标** |
+
+完整数字、Pareto 图与如实差距分析见 [`docs/BENCHMARKS.md`](../BENCHMARKS.md) §1 Findings。
+
+**准出门测试**（附加）：
+
+* `make hnsw-test`（`go test -race`）全绿
+* `make test` 243 passed
+* `make test-ollama` 真·本机 LM 冒烟测试跑绿
+
+**遗留 / 后续**：
+
+* 全网格 `M∈{8,16,32}×efC∈{100,200,400}` 留待后续跑批（每轮 go-hnsw 1M 建图 ~22–68 min）
+* gRPC `Snapshot` RPC、并发读路径 → Phase 5
+* QPS 差距收口（SIMD / 无锁读）→ Phase 5 性能 pass
 
 ## 1. 目标对齐
 

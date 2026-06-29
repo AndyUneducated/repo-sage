@@ -98,6 +98,8 @@ flowchart LR
 
 ## 阶段 4 — go-hnsw v2：持久化 + SIFT-1M 基准
 
+**状态：✅ 已完成**（2026-06-29，commit `28bc663`）
+
 **目标**：把 HNSW 模块从「内存能用」做成可严肃对标、可基准测试的产物。
 
 * mmap 快照/恢复，采用 `docs/ARCHITECTURE.md` 中的 CSR 邻接格式。
@@ -110,6 +112,13 @@ flowchart LR
 
 **演示**：打开 `docs/BENCHMARKS.md`；图上有两条曲线（go-hnsw、Faiss-HNSWFlat）及对差距的如实说明。
 **退出指标**：Pareto 曲线已发布；1M × 128-d 从快照重载 P50 < 200 ms。
+
+| 退出指标 | 目标 | 实测 |
+| --- | --- | --- |
+| Pareto 曲线（go-hnsw + Faiss） | 已发布 | ✅ [`docs/BENCHMARKS.md`](BENCHMARKS.md) §1 |
+| 1M×128 快照重载 P50 | < 200 ms | ✅ **11.7–13.0 ms** |
+| mmap 持久化 + Algorithm 4 | 落地 | ✅ `persist.go` / `insert.go` |
+| 单测 + race | 全绿 | ✅ `make hnsw-test` |
 
 ---
 
@@ -157,6 +166,29 @@ flowchart LR
 ---
 
 ## 进度跟踪
+
+| 阶段 | 状态 | 完成日期 | 备注 |
+| --- | --- | --- | --- |
+| 0 骨架 + CI | ✅ | 2026-05 | `make test` 全绿 |
+| 1 索引器 v1 | ✅ | 2026-05 | tree-sitter + 符号图 |
+| 2 混合检索 RAG | ✅ | 2026-05 | `/ask` + HNSW/BM25/RRF |
+| 3 GraphRAG | ✅ | 2026-06 | Leiden + 社区摘要；50 题基准 |
+| 4 go-hnsw v2 | ✅ | 2026-06-29 | mmap 快照 + SIFT-1M 基准 |
+| 5 加固 + eval-gate | ⬜ | — | **当前焦点** |
+| 6 GitHub App | ⬜ | — | 依赖 Phase 5 |
+| 7 延伸目标 | ⬜ | — | Tantivy / 多语言 / 增量索引 |
+
+```mermaid
+flowchart LR
+  P0["Phase 0 ✅"] --> P1["Phase 1 ✅"]
+  P1 --> P2["Phase 2 ✅"]
+  P2 --> P3["Phase 3 ✅"]
+  P2 --> P4["Phase 4 ✅"]
+  P3 --> P5["Phase 5 ⬜"]
+  P4 --> P5
+  P5 --> P6["Phase 6 ⬜"]
+  P6 --> P7["Phase 7 ⬜"]
+```
 
 * 每个阶段在 issue 跟踪器里对应一个里程碑（`Phase 0` … `Phase 7`）。
 * 阶段退出指标写在本文件 *以及* 对应里程碑描述中；与实际情况不符时两处同步更新。

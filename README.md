@@ -299,28 +299,37 @@ flowchart LR
 
 ## go-hnsw 服务与冷启动
 
-`go-hnsw` 是内存索引，没有自己的持久化（Phase 5 才上 mmap），所以每次启动靠 **从 SQLite `embeddings` 表流式重建**：
+`go-hnsw` 是内存索引；**Phase 4** 已落地 mmap 快照（`Snapshot` / `Recover`），启动时优先走快照快速重载，无快照时才从 SQLite 流式重建：
 
 ```mermaid
-flowchart LR
-  Boot["server 启动"] --> Idx["创建空 hnsw.Index"]
-  DB[("SQLite embeddings<br/>(向量真身)")] -->|"流式读 (chunk_id, vector)<br/>逐条 Add"| Idx
-  Idx --> Bind["绑定 gRPC 端口"]
-  Bind --> Serve["服务 Search / Add / BulkLoad / Stats"]
+flowchart TD
+  Boot["server 启动"] --> HasSnap{"快照文件存在?"}
+  HasSnap -->|是| Recover["mmap Recover<br/>O(解析小数组)"]
+  HasSnap -->|否| Stream["SQLite embeddings<br/>流式读 + 逐条 Add"]
+  Stream --> WriteSnap["写初始快照<br/>tmp + fsync + rename"]
+  Recover --> Bind["绑定 gRPC 端口"]
+  WriteSnap --> Bind
+  Bind --> Serve["Search / Add / BulkLoad / Stats"]
   Py["Python RetrievalService"] <-->|"gRPC"| Serve
   Serve -. "Search 只返回 (chunk_id, distance)" .-> Py
 ```
 
-冷启动是 `O(N)` 读 float32 BLOB（10k 向量 <100ms，200k 约 2s）。`Stats` 暴露 `(size, dim, model, M, efC, efSearch)`，让 Python 端在维度/模型不匹配时快速失败。算法核心（插入 Alg 1、搜索 Alg 5）在 [`go-hnsw/insert.go`](go-hnsw/insert.go) / [`search.go`](go-hnsw/search.go)，gRPC 服务在 [`go-hnsw/internal/grpcserver/`](go-hnsw/internal/grpcserver)，冷启动加载在 `sqlite_load.go`。
+| 启动路径 | 适用场景 | 典型耗时（量级） |
+| --- | --- | --- |
+| **快照 Recover**（快路径） | 生产 / 大索引；`--snapshot` 或 `hnsw_snapshot_path` 已配置 | 1M×128-d：**P50 ≈ 12 ms**（见 [BENCHMARKS](docs/BENCHMARKS.md)） |
+| **SQLite 流式 Add**（回退） | 首次部署、快照缺失、模型/维度变更后重建 | `O(N)` 读 BLOB（10k 向量 <100 ms，200k ≈ 2 s） |
 
-> mmap 快照（`Snapshot`/`Recover`）目前是 Phase 5 规划，[`go-hnsw/persist.go`](go-hnsw/persist.go) 暂返回 `errPersistNotImplemented`。
+* `Stats` 暴露 `(size, dim, model, M, efC, efSearch)`，维度/模型不匹配时 Python 端快速失败。
+* 算法：插入 Alg 1 + 启发式邻居 Alg 4 + 搜索 Alg 5，见 [`go-hnsw/insert.go`](go-hnsw/insert.go) / [`search.go`](go-hnsw/search.go)。
+* 持久化布局与原子写入见 [`go-hnsw/persist.go`](go-hnsw/persist.go)、[`docs/plans/phase-4-hnsw-v2.md`](docs/plans/phase-4-hnsw-v2.md)。
+* gRPC 服务：[`go-hnsw/internal/grpcserver/`](go-hnsw/internal/grpcserver)；SQLite 冷载：[`sqlite_load.go`](go-hnsw/internal/grpcserver/sqlite_load.go)。
 
 ## 有什么新东西
 
 | 亮点 | 说明 |
 | --- | --- |
-| **`go-hnsw/`：从零自研的 HNSW** | 用 Go 实现 Malkov & Yashunin 2018 的 HNSW，带 `mmap` 持久化。在 SIFT-1M 上与 Faiss 做对照，沿 `M` / `efConstruction` / `efSearch` 报告 QPS、内存、P99 延迟。本身是一个可独立 `go get` 的 Go module。 |
-| **双索引检索（dual-index）** | Symbol Graph（确定性）+ GraphRAG 社区摘要（聚合）+ 向量/BM25 混合检索（语义兜底），由一个轻量 query router 选路。**目标**：在自建 200 题跨文件基准上，相比纯向量基线把回答准确率提升 ≥ 25%（见 [ROADMAP](docs/ROADMAP.md) Phase 3 退出指标；实测数字以 [BENCHMARKS](docs/BENCHMARKS.md) 为唯一来源，当前为 pending）。 |
+| **`go-hnsw/`：从零自研的 HNSW** | 用 Go 实现 Malkov & Yashunin 2018 的 HNSW，**Phase 4 已落地 mmap 持久化**。SIFT-1M 上与 Faiss-HNSWFlat 对照的 Pareto 曲线已发布（[BENCHMARKS §1](docs/BENCHMARKS.md)）。可独立 `go get` 的 Go module。 |
+| **双索引检索（dual-index）** | Symbol Graph（确定性）+ GraphRAG 社区摘要（聚合）+ 向量/BM25 混合检索（语义兜底），由一个轻量 query router 选路。**目标**：200 题跨文件基准上相对纯向量基线提升 ≥ 25%（Phase 3 退出指标；SIFT-1M 数字见 [BENCHMARKS](docs/BENCHMARKS.md)，跨文件 QA 仍为 pending）。 |
 | **自建评测 harness** | 横跨 Python / TypeScript / Go、共 200 题人工标注的跨文件问答集；用 Ragas + 自定义引用对齐校验打分，并接入 CI 作为回归门（regression gate）。 |
 | **代码智能栈的"读"侧** | 与负责"写"侧（重构 / mutation）的姐妹项目共享同一份索引格式。 |
 

@@ -37,8 +37,16 @@ flowchart TD
 | 2 | gRPC server (`cmd/server`) consumed by the Python retriever |
 | 4 | Algorithm 4 heuristic neighbour selection (diverse edges, higher recall) |
 | 4 | `mmap` persistence — atomic `Snapshot` + zero-copy `Recover` |
-| 4 | SIFT-1M benchmark vs Faiss; Pareto curve over `M` × `efC` × `efSearch` |
-| 5 | Concurrency (per-layer read locks, lock-free search path) |
+| 4 | SIFT-1M benchmark vs Faiss; Pareto curve over `M` × `efC` × `efSearch` | ✅ published |
+| 5 | Concurrency (per-layer read locks, lock-free search path) | planned |
+
+**Published SIFT-1M results** (see [`docs/BENCHMARKS.md`](../docs/BENCHMARKS.md) §1 for full tables + plot):
+
+| Metric | go-hnsw | Faiss-HNSWFlat |
+| --- | --- | --- |
+| Recall@10 (best config) | 0.9992 | 0.9992 |
+| Recover P50 (1M×128) | **11.7–13.0 ms** | n/a |
+| QPS @ ~0.99 recall (1 thread) | ~1.0–1.1k | ~2.7k |
 
 ## Layout
 
