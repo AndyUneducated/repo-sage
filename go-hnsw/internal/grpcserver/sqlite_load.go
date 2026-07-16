@@ -52,7 +52,29 @@ func (s *Server) LoadFromSQLite(dbPath, model string) (uint64, error) {
 	}
 	defer rows.Close()
 
+	// Buffer rows and insert in batches so the write lock is taken once per
+	// flush rather than once per vector (see hnsw.Index.AddBatch).
+	const flushEvery = 1024
 	var n uint64
+	ids := make([]string, 0, flushEvery)
+	vecs := make([][]float32, 0, flushEvery)
+
+	flush := func() error {
+		if len(ids) == 0 {
+			return nil
+		}
+		s.mu.Lock()
+		added, err := s.index.AddBatch(ids, vecs)
+		s.mu.Unlock()
+		n += uint64(added)
+		ids = ids[:0]
+		vecs = vecs[:0]
+		if err != nil {
+			return fmt.Errorf("add batch: %w", err)
+		}
+		return nil
+	}
+
 	for rows.Next() {
 		var chunkID string
 		var blob []byte
@@ -70,16 +92,19 @@ func (s *Server) LoadFromSQLite(dbPath, model string) (uint64, error) {
 		if err != nil {
 			return n, fmt.Errorf("decode %s: %w", chunkID, err)
 		}
-		s.mu.Lock()
-		err = s.index.Add(chunkID, vec)
-		s.mu.Unlock()
-		if err != nil {
-			return n, fmt.Errorf("add %s: %w", chunkID, err)
+		ids = append(ids, chunkID)
+		vecs = append(vecs, vec)
+		if len(ids) >= flushEvery {
+			if err := flush(); err != nil {
+				return n, err
+			}
 		}
-		n++
 	}
 	if err := rows.Err(); err != nil {
 		return n, fmt.Errorf("iter embeddings: %w", err)
+	}
+	if err := flush(); err != nil {
+		return n, err
 	}
 	return n, nil
 }

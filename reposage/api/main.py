@@ -16,9 +16,11 @@ from reposage.observability.otel import setup_tracing
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    setup_tracing(
-        service_name=settings.otel_service_name, endpoint=settings.otel_exporter_otlp_endpoint
-    )
+    if settings.otel_enabled:
+        setup_tracing(
+            service_name=settings.otel_service_name,
+            endpoint=settings.otel_exporter_otlp_endpoint,
+        )
     yield
 
 

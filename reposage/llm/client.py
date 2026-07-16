@@ -57,6 +57,8 @@ class LiteLLMClient:
     async def complete(self, messages: Sequence[ChatMessage]) -> str:
         from litellm import acompletion  # noqa: PLC0415
 
+        from reposage.observability.otel import span  # noqa: PLC0415
+
         kwargs: dict[str, object] = {
             "model": self._model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -65,7 +67,11 @@ class LiteLLMClient:
         }
         if self._api_base is not None:
             kwargs["api_base"] = self._api_base
-        resp = await acompletion(**kwargs)
+        with span(
+            "llm.complete",
+            {"llm.model": self._model, "llm.n_messages": len(messages)},
+        ):
+            resp = await acompletion(**kwargs)
         # LiteLLM normalises responses to OpenAI shape; first choice is canonical.
         # Both attribute-access (litellm objects) and dict-access (raw OpenAI
         # SDK shape) are accepted because providers differ in what they return.

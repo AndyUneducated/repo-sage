@@ -16,14 +16,19 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from reposage.indexer.embedder import EmbeddingProvider
+from reposage.observability.otel import span
 from reposage.retrieval.protocols import (
     DenseRetriever,
     Reranker,
+    ScoredId,
     SparseRetriever,
 )
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 
 @dataclass(slots=True, frozen=True)
@@ -85,12 +90,35 @@ class HybridRetriever:
         top_k: int = 8,
         rerank: bool | None = None,
     ) -> list[RetrievedChunk]:
+        with span("retrieval.hybrid", {"top_k": top_k}) as sp:
+            return await self._retrieve(query, repo=repo, top_k=top_k, rerank=rerank, sp=sp)
+
+    async def _retrieve(
+        self,
+        query: str,
+        *,
+        repo: str | None,
+        top_k: int,
+        rerank: bool | None,
+        sp: Span | None,
+    ) -> list[RetrievedChunk]:
         # Embed the query (single text → single (1, dim) row).
         query_vec = self.embedder.embed([query])[0].tolist()
 
-        dense_task = asyncio.create_task(self.dense.search(query_vec, top_k=self.top_k_per_branch))
-        sparse_task = asyncio.create_task(self.sparse.search(query, top_k=self.top_k_per_branch))
+        async def _dense() -> list[ScoredId]:
+            with span("retrieval.dense", {"top_k_per_branch": self.top_k_per_branch}):
+                return await self.dense.search(query_vec, top_k=self.top_k_per_branch)
+
+        async def _sparse() -> list[ScoredId]:
+            with span("retrieval.sparse", {"top_k_per_branch": self.top_k_per_branch}):
+                return await self.sparse.search(query, top_k=self.top_k_per_branch)
+
+        dense_task = asyncio.create_task(_dense())
+        sparse_task = asyncio.create_task(_sparse())
         dense_hits, sparse_hits = await asyncio.gather(dense_task, sparse_task)
+        if sp is not None:
+            sp.set_attribute("retrieval.dense_hits", len(dense_hits))
+            sp.set_attribute("retrieval.sparse_hits", len(sparse_hits))
 
         fused = rrf_fuse(
             [
@@ -135,11 +163,12 @@ class HybridRetriever:
 
         do_rerank = rerank if rerank is not None else (self.reranker is not None)
         if do_rerank and self.reranker is not None and candidates:
-            scored = self.reranker.rerank(
-                query,
-                [(c.chunk_id, c.text) for c in candidates],
-                top_k=top_k,
-            )
+            with span("retrieval.rerank", {"n_candidates": len(candidates)}):
+                scored = self.reranker.rerank(
+                    query,
+                    [(c.chunk_id, c.text) for c in candidates],
+                    top_k=top_k,
+                )
             score_by_id = {s.chunk_id: s.score for s in scored}
             candidates = [
                 RetrievedChunk(
@@ -158,7 +187,10 @@ class HybridRetriever:
             ]
             candidates.sort(key=lambda c: c.score, reverse=True)
 
-        return candidates[:top_k]
+        result = candidates[:top_k]
+        if sp is not None:
+            sp.set_attribute("retrieval.n_results", len(result))
+        return result
 
     def _fetch_chunks(
         self, chunk_ids: Sequence[str], *, repo: str | None

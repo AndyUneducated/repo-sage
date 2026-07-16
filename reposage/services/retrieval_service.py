@@ -27,6 +27,7 @@ from reposage.llm.grounding import (
     verify_grounding,
 )
 from reposage.llm.prompts import build_answer_messages, build_community_answer_messages
+from reposage.observability.otel import span
 from reposage.retrieval.hybrid import HybridRetriever, RetrievedChunk
 from reposage.retrieval.protocols import (
     CommunityRetriever,
@@ -168,42 +169,50 @@ class RetrievalService:
         top_k: int | None = None,
     ) -> AnswerResult:
         """Single dispatcher: route → linear `_run_*` → optional degrade."""
-        t0 = time.monotonic()
-        decision = await self._route(question, route_hint=route_hint)
-        effective_top_k = top_k or self.top_k
+        with span(
+            "retrieval.answer",
+            {"qa.repo": repo or "", "qa.route_hint": route_hint or "auto"},
+        ) as sp:
+            t0 = time.monotonic()
+            decision = await self._route(question, route_hint=route_hint)
+            if sp is not None:
+                sp.set_attribute("qa.route", decision.name)
+            effective_top_k = top_k or self.top_k
 
-        if decision.name == "graph":
-            assert decision.symbol is not None
-            return self._run_graph(question=question, decision=decision, t0=t0)
+            if decision.name == "graph":
+                assert decision.symbol is not None
+                return self._run_graph(question=question, decision=decision, t0=t0)
 
-        if decision.name == "community":
-            outcome_or_degrade = await self._run_community(
-                question=question, t0=t0, top_k=effective_top_k, repo=repo
-            )
-            if isinstance(outcome_or_degrade, AnswerResult):
-                return outcome_or_degrade
-            logger.warning("community route degrading to hybrid: %s", outcome_or_degrade.reason)
+            if decision.name == "community":
+                outcome_or_degrade = await self._run_community(
+                    question=question, t0=t0, top_k=effective_top_k, repo=repo
+                )
+                if isinstance(outcome_or_degrade, AnswerResult):
+                    return outcome_or_degrade
+                logger.warning("community route degrading to hybrid: %s", outcome_or_degrade.reason)
+                if sp is not None:
+                    sp.set_attribute("qa.degraded_from", "community")
+                return await self._run_hybrid(
+                    question=question,
+                    t0=t0,
+                    top_k=effective_top_k,
+                    repo=repo,
+                    outcome=RouteOutcome(
+                        route="hybrid",
+                        degraded_from="community",
+                        degrade_reason=outcome_or_degrade.reason,
+                    ),
+                    embed_ms=outcome_or_degrade.embed_ms,
+                    community_context=outcome_or_degrade.community_context,
+                )
+
             return await self._run_hybrid(
                 question=question,
                 t0=t0,
                 top_k=effective_top_k,
                 repo=repo,
-                outcome=RouteOutcome(
-                    route="hybrid",
-                    degraded_from="community",
-                    degrade_reason=outcome_or_degrade.reason,
-                ),
-                embed_ms=outcome_or_degrade.embed_ms,
-                community_context=outcome_or_degrade.community_context,
+                outcome=RouteOutcome(route="hybrid"),
             )
-
-        return await self._run_hybrid(
-            question=question,
-            t0=t0,
-            top_k=effective_top_k,
-            repo=repo,
-            outcome=RouteOutcome(route="hybrid"),
-        )
 
     # --------------------------------------------------------------- routing
 
@@ -231,21 +240,24 @@ class RetrievalService:
         store = SQLiteSymbolGraphStore(self.sqlite_path)
         store.init_schema()
         try:
-            nodes = store.find_nodes_by_suffix(symbol)
-            lines: list[str] = []
-            citations: list[Citation] = []
-            for node in nodes:
-                callers = store.callers_of(node.fqn)
-                if not callers:
-                    lines.append(f"- {node.fqn} has no recorded callers.")
-                    continue
-                lines.append(f"- {node.fqn}:")
-                for e in callers:
-                    lines.append(f"    - {e.src} at [{e.src_path}:{e.src_line}-{e.src_line}]")
-                    citations.append(
-                        Citation(path=e.src_path, start_line=e.src_line, end_line=e.src_line)
-                    )
-            answer = "\n".join(lines) if lines else f"No symbol matching {symbol!r} in the index."
+            with span("retrieval.graph", {"graph.symbol": symbol}):
+                nodes = store.find_nodes_by_suffix(symbol)
+                lines: list[str] = []
+                citations: list[Citation] = []
+                for node in nodes:
+                    callers = store.callers_of(node.fqn)
+                    if not callers:
+                        lines.append(f"- {node.fqn} has no recorded callers.")
+                        continue
+                    lines.append(f"- {node.fqn}:")
+                    for e in callers:
+                        lines.append(f"    - {e.src} at [{e.src_path}:{e.src_line}-{e.src_line}]")
+                        citations.append(
+                            Citation(path=e.src_path, start_line=e.src_line, end_line=e.src_line)
+                        )
+                answer = (
+                    "\n".join(lines) if lines else f"No symbol matching {symbol!r} in the index."
+                )
         finally:
             store.close()
         elapsed = int((time.monotonic() - t0) * 1000)
@@ -338,6 +350,17 @@ class RetrievalService:
         if self.community is None or self._embedder is None:
             return _Degrade(reason="community route not configured")
 
+        community_span = span("retrieval.community", {"community.top_k": self.community_top_k})
+        with community_span:
+            return await self._run_community_inner(question=question, t0=t0)
+
+    async def _run_community_inner(
+        self,
+        *,
+        question: str,
+        t0: float,
+    ) -> AnswerResult | _Degrade:
+        assert self.community is not None and self._embedder is not None
         embed_t0 = time.monotonic()
         qvec = self._embedder.embed([question])[0]
         embed_ms = int((time.monotonic() - embed_t0) * 1000)

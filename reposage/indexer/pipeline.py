@@ -30,6 +30,7 @@ from reposage.indexer.graphrag.seed import fqns_only, pick_seed_members
 from reposage.indexer.graphrag.summarizer import CommunitySummarizer
 from reposage.indexer.parser import ParseResult, TreeSitterParser
 from reposage.indexer.python_resolver import PythonModuleResolver
+from reposage.observability.otel import span
 from reposage.retrieval.protocols import LLMClient
 from reposage.storage.chunk_store import ChunkStore
 from reposage.storage.community_store import CommunityStore
@@ -129,6 +130,18 @@ class IndexPipeline:
         self.community_summary_concurrency = community_summary_concurrency
 
     def run(self, force: bool = False) -> IndexManifest:
+        """Trace-wrapping entry point; the work lives in :meth:`_run`."""
+        with span("index.run", {"index.repo": self.repo_name, "index.force": force}) as sp:
+            manifest = self._run(force=force)
+            if sp is not None:
+                sp.set_attribute("index.n_files", manifest.n_files)
+                sp.set_attribute("index.n_chunks", manifest.n_chunks)
+                sp.set_attribute("index.n_symbols", manifest.n_symbols)
+                sp.set_attribute("index.n_edges", manifest.n_edges)
+                sp.set_attribute("index.n_communities", manifest.n_communities)
+            return manifest
+
+    def _run(self, force: bool = False) -> IndexManifest:
         t0 = time.monotonic()
         manifest = IndexManifest(repo=self.repo_name)
         graph_store = SQLiteSymbolGraphStore(self.sqlite_path)
@@ -172,10 +185,14 @@ class IndexPipeline:
                     logger.exception("indexing failed for %s", path)
 
             if python_extractions:
-                resolver = PythonModuleResolver(repo=self.repo_name)
-                graph = resolver.resolve(python_extractions)
-                manifest.n_symbols += graph_store.upsert_nodes(graph.nodes)
-                manifest.n_edges += graph_store.upsert_edges(graph.edges)
+                with span(
+                    "index.symbol_graph.resolve",
+                    {"index.n_files": len(python_extractions)},
+                ):
+                    resolver = PythonModuleResolver(repo=self.repo_name)
+                    graph = resolver.resolve(python_extractions)
+                    manifest.n_symbols += graph_store.upsert_nodes(graph.nodes)
+                    manifest.n_edges += graph_store.upsert_edges(graph.edges)
 
             graph_store.upsert_repo_meta(repo=self.repo_name)
 
@@ -227,7 +244,8 @@ class IndexPipeline:
             min_size=self.community_min_size,
         )
         try:
-            detected, stats = detector.detect(graph_store, repo=self.repo_name)
+            with span("index.graphrag.detect"):
+                detected, stats = detector.detect(graph_store, repo=self.repo_name)
         except Exception as exc:
             manifest.failures.append(f"<community-detect>: {exc!r}")
             logger.exception("community detection failed for %s", self.repo_name)
@@ -249,13 +267,20 @@ class IndexPipeline:
                 concurrency=self.community_summary_concurrency,
             )
             try:
-                summarised = asyncio.run(
-                    summariser.summarize_all(
-                        detected,
-                        conn=chunk_store._connect(),
-                        existing=existing,
+                with span(
+                    "index.graphrag.summarize",
+                    {
+                        "graphrag.n_communities": len(detected),
+                        "graphrag.concurrency": self.community_summary_concurrency,
+                    },
+                ):
+                    summarised = asyncio.run(
+                        summariser.summarize_all(
+                            detected,
+                            conn=chunk_store._connect(),
+                            existing=existing,
+                        )
                     )
-                )
             except Exception as exc:
                 manifest.failures.append(f"<community-summary>: {exc!r}")
                 logger.exception("community summarisation failed")
@@ -289,7 +314,8 @@ class IndexPipeline:
                 c for c in summarised if c.summary and c.summary != "<auto-summary unavailable>"
             ]
             if with_summary:
-                vectors = self.embedder.embed([c.summary or "" for c in with_summary])
+                with span("index.graphrag.embed", {"graphrag.n_summaries": len(with_summary)}):
+                    vectors = self.embedder.embed([c.summary or "" for c in with_summary])
                 for c, vec in zip(with_summary, vectors, strict=True):
                     db_id = local_to_db.get(c.id)
                     if db_id is None:

@@ -65,6 +65,13 @@ def index(
 ) -> None:
     """Build symbol graph + chunks + embeddings (+ communities) for a repo."""
     settings = get_settings()
+    if settings.otel_enabled:
+        from reposage.observability.otel import setup_tracing
+
+        setup_tracing(
+            service_name=settings.otel_service_name,
+            endpoint=settings.otel_exporter_otlp_endpoint,
+        )
     db_path = sqlite_path or settings.sqlite_path
     embedder = None if no_embed else build_embedder()
     summarizer_llm = build_summarizer_llm() if graphrag else None

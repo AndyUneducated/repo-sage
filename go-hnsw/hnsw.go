@@ -7,12 +7,18 @@
 //     contiguous arena so the kernel can page them in lazily.
 //   - Distance computations are the dominant cost, so DistanceFunc is exposed
 //     in Config rather than hardcoded.
-//   - Search is single-threaded per query; concurrency lives at the Index
-//     level via per-layer RWMutex (added in Phase 6).
+//   - Search is single-threaded per query. Concurrency lives at the Index
+//     level via a single sync.RWMutex: many Search calls proceed concurrently
+//     (RLock), while Add / AddBatch take the write lock (single-writer). The
+//     gRPC server (Phase 5) mirrors this with its own RWMutex so reads never
+//     serialise behind each other. A finer per-layer sharded lock is a
+//     possible future optimisation but is not needed for the single-writer
+//     indexing model.
 package hnsw
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -94,6 +100,41 @@ func (ix *Index) Add(id string, vec []float32) error {
 		ix.thawLocked()
 	}
 	return ix.graph.insert(id, vec)
+}
+
+// AddBatch inserts (or replaces) many vectors under a single write lock. This
+// is the batch-upsert fast path used by BulkLoad / cold-load: acquiring
+// ix.mu once for N vectors instead of once per vector removes the lock
+// hand-off between every insert, which dominates when a single indexer
+// goroutine streams a whole repo's embeddings in. Order is preserved so a
+// caller can correlate the returned error with its input slice.
+//
+// It validates every dimension up front so a single bad row fails the batch
+// before any mutation, keeping the "all or nothing per RPC" contract the
+// gRPC BulkLoad handler relies on. Returns the number successfully inserted.
+func (ix *Index) AddBatch(ids []string, vecs [][]float32) (int, error) {
+	if len(ids) != len(vecs) {
+		return 0, errors.New("hnsw: ids/vecs length mismatch")
+	}
+	for i, vec := range vecs {
+		if len(vec) != ix.cfg.Dim {
+			return 0, fmt.Errorf("hnsw: vector %d dim %d != index dim %d", i, len(vec), ix.cfg.Dim)
+		}
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.closed {
+		return 0, errClosed
+	}
+	if ix.graph.frozen {
+		ix.thawLocked()
+	}
+	for i, id := range ids {
+		if err := ix.graph.insert(id, vecs[i]); err != nil {
+			return i, err
+		}
+	}
+	return len(ids), nil
 }
 
 // thawLocked copies the mmap-aliased vector arena and id bytes into owned

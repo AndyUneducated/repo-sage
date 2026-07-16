@@ -10,7 +10,7 @@ retrieval concurrently (the whole point of the hybrid retriever).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 
 import grpc
 
@@ -98,6 +98,23 @@ class HnswGrpcClient:
         stub = await self._connect()
         resp = await stub.Add(hnsw_pb2.AddRequest(id=chunk_id, vector=list(vector)))
         return int(resp.size)
+
+    async def bulk_load(self, items: Iterable[tuple[str, Sequence[float]]]) -> int:
+        """Stream many vectors in one client-streaming ``BulkLoad`` RPC.
+
+        The server buffers and inserts them via ``Index.AddBatch`` (one write
+        lock per flush), so this is the batch-upsert path the indexer should
+        use for a cold load instead of a per-vector ``add`` loop. Returns the
+        number of vectors the server reports inserted.
+        """
+        stub = await self._connect()
+
+        async def _requests() -> AsyncIterator[hnsw_pb2.AddRequest]:
+            for chunk_id, vector in items:
+                yield hnsw_pb2.AddRequest(id=chunk_id, vector=list(vector))
+
+        resp = await stub.BulkLoad(_requests())
+        return int(resp.inserted)
 
 
 # Backwards-compatible alias kept for code that imported the old stub name.

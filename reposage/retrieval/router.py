@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from reposage.llm.prompts import build_router_messages
+from reposage.observability.otel import span
 from reposage.retrieval.protocols import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,15 @@ class QueryRouter:
     # ---------------------------------------------------- async route
 
     async def route(self, question: str) -> QueryRoute:
+        with span("retrieval.route") as sp:
+            decision = await self._route(question)
+            if sp is not None:
+                sp.set_attribute("route.name", decision.name)
+                sp.set_attribute("route.reason", decision.reason)
+                sp.set_attribute("route.confidence", decision.confidence)
+            return decision
+
+    async def _route(self, question: str) -> QueryRoute:
         symbol = self.detect_symbol(question)
         if symbol is not None:
             return QueryRoute(

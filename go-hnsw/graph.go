@@ -17,8 +17,9 @@ import (
 // built lazily on the first Add (serving-only deploys never pay for it).
 //
 // The implementation is single-writer: every public Index method wraps the
-// graph mutation in an `Index.mu` lock, so no per-graph synchronisation is
-// needed here. Phase 5 will swap this for sharded locks.
+// graph mutation in an `Index.mu` write lock while Search takes the read
+// lock, so no per-graph synchronisation is needed here. Batch inserts reuse
+// the same lock once via Index.AddBatch.
 
 type node struct {
 	vector    []float32

@@ -19,10 +19,17 @@ import (
 // Server is the gRPC façade. It wraps a single hnsw.Index, plus the model
 // label so clients can confirm they're talking to a server that holds the
 // vectors they expect.
+//
+// Concurrency (Phase 5): mu is a RWMutex so read RPCs (Search / Stats) take
+// the read lock and run concurrently, while write RPCs (Add / BulkLoad /
+// Snapshot / Close / LoadFromSQLite) take the write lock. This mirrors the
+// single-writer/many-reader model of the underlying hnsw.Index and removes
+// the false serialisation the earlier plain Mutex imposed on concurrent
+// searches.
 type Server struct {
 	pb.UnimplementedHnswServiceServer
 
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	index *hnsw.Index
 	cfg   hnsw.Config
 	model string
@@ -60,9 +67,9 @@ func (s *Server) Close() error {
 	return s.index.Close()
 }
 
-// Add inserts or replaces a vector under the given id. The server holds a
-// single mutex around the index because Phase 2 ships a single-writer/
-// single-reader index; Phase 6 will shard or use per-layer RWMutex.
+// Add inserts or replaces a vector under the given id. It takes the write
+// lock so it is exclusive with other writers and with in-flight searches;
+// concurrent reads resume as soon as it returns.
 func (s *Server) Add(_ context.Context, req *pb.AddRequest) (*pb.AddResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "nil request")
@@ -87,11 +94,38 @@ func (s *Server) Add(_ context.Context, req *pb.AddRequest) (*pb.AddResponse, er
 	return &pb.AddResponse{Ok: true, Size: size}, nil
 }
 
-// BulkLoad is a streaming Add used by the indexer at startup. We reply with
-// a summary once the client closes the stream so transient errors mid-load
-// abort the whole batch (the client retries).
+// bulkLoadFlush bounds how many streamed vectors we buffer before taking the
+// write lock once to AddBatch them. Batching amortises the lock hand-off over
+// many inserts (the win of Index.AddBatch) while still bounding memory so a
+// multi-million-vector stream doesn't materialise entirely in RAM.
+const bulkLoadFlush = 1024
+
+// BulkLoad is a streaming Add used by the indexer at startup. Incoming
+// vectors are buffered and flushed in batches through Index.AddBatch, which
+// takes the write lock once per flush instead of once per vector. We reply
+// with a summary once the client closes the stream so transient errors
+// mid-load abort the whole batch (the client retries).
 func (s *Server) BulkLoad(stream pb.HnswService_BulkLoadServer) error {
 	var inserted uint64
+	ids := make([]string, 0, bulkLoadFlush)
+	vecs := make([][]float32, 0, bulkLoadFlush)
+
+	flush := func() error {
+		if len(ids) == 0 {
+			return nil
+		}
+		s.mu.Lock()
+		n, err := s.index.AddBatch(ids, vecs)
+		s.mu.Unlock()
+		inserted += uint64(n)
+		ids = ids[:0]
+		vecs = vecs[:0]
+		if err != nil {
+			return status.Errorf(codes.Internal, "add: %v", err)
+		}
+		return nil
+	}
+
 	for {
 		req, err := stream.Recv()
 		if errors.Is(err, errEOF) || isEOF(err) {
@@ -110,17 +144,20 @@ func (s *Server) BulkLoad(stream pb.HnswService_BulkLoadServer) error {
 				"vector dim %d != server dim %d", len(vec), s.cfg.Dim,
 			)
 		}
-		s.mu.Lock()
-		err = s.index.Add(req.GetId(), vec)
-		s.mu.Unlock()
-		if err != nil {
-			return status.Errorf(codes.Internal, "add: %v", err)
+		ids = append(ids, req.GetId())
+		vecs = append(vecs, vec)
+		if len(ids) >= bulkLoadFlush {
+			if err := flush(); err != nil {
+				return err
+			}
 		}
-		inserted++
 	}
-	s.mu.Lock()
+	if err := flush(); err != nil {
+		return err
+	}
+	s.mu.RLock()
 	size := uint64(s.index.Len())
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	return stream.SendAndClose(&pb.BulkLoadResponse{Inserted: inserted, Size: size})
 }
 
@@ -139,9 +176,9 @@ func (s *Server) Search(_ context.Context, req *pb.SearchRequest) (*pb.SearchRes
 			"vector dim %d != server dim %d", len(vec), s.cfg.Dim,
 		)
 	}
-	s.mu.Lock()
+	s.mu.RLock()
 	hits, err := s.index.Search(vec, int(req.GetTopK()), int(req.GetEfSearch()))
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "search: %v", err)
 	}
@@ -154,9 +191,9 @@ func (s *Server) Search(_ context.Context, req *pb.SearchRequest) (*pb.SearchRes
 
 // Stats lets clients confirm dim / model agree before issuing inserts.
 func (s *Server) Stats(_ context.Context, _ *pb.StatsRequest) (*pb.StatsResponse, error) {
-	s.mu.Lock()
+	s.mu.RLock()
 	size := uint64(s.index.Len())
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	return &pb.StatsResponse{
 		Size:           size,
 		Dim:            uint32(s.cfg.Dim),

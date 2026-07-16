@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     github_webhook_secret: str | None = None
 
     # ---- Observability ----
+    # Tracing is opt-in: span *instrumentation* is always compiled in (the
+    # spans are cheap no-ops without a configured TracerProvider), but we
+    # only stand up the OTLP exporter when this flag is set. Keeps `reposage
+    # index` / tests / a fresh clone from spamming connection-refused logs
+    # when no collector is running.
+    otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     otel_service_name: str = "reposage"
     log_level: str = "INFO"

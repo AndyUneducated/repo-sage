@@ -12,8 +12,8 @@
 | 3 | GraphRAG（Leiden + 摘要） | 1.5 周 | 可回答模块级问题；200 题基准中前 50 题上线；相对混合基线有 +X% 提升。 |
 | 4 | go-hnsw v2：持久化 + 基准测试 | 1.5 周 | mmap 快照；SIFT-1M Pareto 曲线写入 `docs/BENCHMARKS.md`，与 Faiss 对比。 |
 | 5 | 加固：评测门禁、OTel、性能 | 1.0 周 | Eval-gate 工作流拦截回归；完整 200 题基准；OTel 链路可观测。 |
-| 6 | GitHub App | 1.0 周 | 在已加固的引擎上对外上线；@ 提及 → 30 秒内带引用的 PR 评论。 |
-| 7 | 延伸：Tantivy / TS+Go 语法 | 灵活 | 替换 BM25；在真实多语言仓库上做多语言索引；博客初稿。 |
+| 6 | 延伸：Tantivy / TS+Go 语法 | 灵活 | 替换 BM25；在真实多语言仓库上做多语言索引；博客初稿。 |
+| 7 | GitHub App | 1.0 周 | 在已加固、已增强的引擎上对外上线；@ 提及 → 30 秒内带引用的 PR 评论。 |
 
 各阶段的依赖关系（哪些必须先做、哪些可以并行）：
 
@@ -25,11 +25,11 @@ flowchart LR
   P2 --> P4["Phase 4<br/>go-hnsw v2"]
   P3 --> P5["Phase 5<br/>加固 + 评测门禁"]
   P4 --> P5
-  P5 --> P6["Phase 6<br/>GitHub App"]
-  P6 --> P7["Phase 7<br/>延伸目标"]
+  P5 --> P6["Phase 6<br/>延伸目标"]
+  P6 --> P7["Phase 7<br/>GitHub App"]
 ```
 
-> Phase 3 / 4 都只依赖 Phase 2，理论上可并行推进；Phase 5 把两者收口加固，随后 Phase 6 才在已加固的引擎上对外部署，最后是 Phase 7 延伸（其增量重索引 / 缓存层依赖 Phase 6 搭起的 `push` 管道）。
+> Phase 3 / 4 都只依赖 Phase 2，理论上可并行推进；Phase 5 把两者收口加固，随后 Phase 6 先做延伸增强（Tantivy / 多语言语法 / 增量索引 / 缓存层），最后 Phase 7 才在已加固、已增强的引擎上把 GitHub App 对外部署。
 
 ---
 
@@ -124,44 +124,46 @@ flowchart LR
 
 ## 阶段 5 — 加固：评测门禁、OTel、性能
 
+**状态：🚧 进行中**（OTel span 埋点、go-hnsw 并发读路径 + 批量 upsert 已落地；完整 200 题基准与 eval-gate 必过检查待补）
+
 **目标**：每次变更在合并前都有度量。
 
-* `benchmarks/cross_file_qa/questions.jsonl` 中完整 200 题（Python + TS + Go）。
-* 带 `run-eval` 标签的 PR 上，`eval-gate` GitHub Action 成为必过检查。
-* 索引与服务端的 OTel 链路导出到本地 Tempo / Jaeger；`docs/` 中有注释好的仪表盘说明。
-* 性能 pass：剖析热路径、批量 HNSW upsert、并行社区摘要。
-* `go-hnsw` 并发：每层 RWMutex、无锁读路径。
+* ⬜ `benchmarks/cross_file_qa/questions.jsonl` 中完整 200 题（Python + TS + Go）。*(数据任务，暂缓)*
+* ⬜ 带 `run-eval` 标签的 PR 上，`eval-gate` GitHub Action 成为必过检查。*(仓库分支保护设置)*
+* 🚧 索引与服务端的 OTel 链路：span 埋点已覆盖 index / router / 三路检索 / LLM 补全；导出经 `REPOSAGE_OTEL_ENABLED` 开关接 OTLP（Tempo / Jaeger）。仪表盘说明待补。
+* 🚧 性能 pass：✅ 批量 HNSW upsert（`Index.AddBatch` + gRPC `BulkLoad`）、✅ 并行社区摘要（`summarizer.summarize_all`）；热路径剖析待做。
+* 🚧 `go-hnsw` 并发：✅ gRPC 服务端 `RWMutex` 并发读路径（读读不再互斥）；每层分片锁（per-layer RWMutex）留作后续优化。
 
 **演示**：开一个拉低检索 recall 的 PR；eval-gate 将其拦截。
 **退出指标**：eval-gate 运行 < 10 分钟；4 核笔记本上 P99 索引吞吐 ≥ 1k chunks/s。
 
 ---
 
-## 阶段 6 — GitHub App 部署
+## 阶段 6 — 延伸目标（顺序任意）
 
-**目标**：真实用户（先是我们，再是任何人）能在公开仓库安装 RepoSage。放在加固之后，确保对外开放时 OTel 可观测、eval-gate 与性能调优均已就位，且可复用 Phase 4 的快照实现快速重载。
+以下为可单独交付的改进；按当前痛点选收益最大的一项即可。放在 GitHub App 之前：先把引擎的吞吐、语言覆盖与缓存打磨好，再对外开放。
+
+* **Tantivy BM25**：用小型 Rust → Python 桥接把 rank-bm25 换成 Tantivy；预期索引吞吐约 10×。
+* **更多语言**：增加 Java、Rust 语法；验证符号图查询仍可用。
+* **增量重索引**：只重解析变更文件；未动文件复用符号图行（后续接上 Phase 7 的 `push` 管道即可自动触发）。
+* **缓存层**：按 `(repo_sha, question)` 缓存每题；重复问题 < 100 ms 返回。
+* **公开博客**：「用 Go 从零写 HNSW 我们学到了什么」，附 SIFT-1M 数据。
+
+---
+
+## 阶段 7 — GitHub App 部署
+
+**目标**：真实用户（先是我们，再是任何人）能在公开仓库安装 RepoSage。放在加固与延伸增强之后，确保对外开放时 OTel 可观测、eval-gate 与性能调优均已就位，索引吞吐 / 多语言 / 缓存也已打磨，且可复用 Phase 4 的快照实现快速重载。
 
 * GitHub App 注册；私钥与 webhook secret 放在 `.env`。
 * HMAC 校验 + JWT 签发 + installation token 缓存。
 * `@reposage` 命令解析；评论线程生命周期。
 * Webhook 处理器转发到现有 `/ask` 流程。
 * Markdown 引用渲染，含永久链接（`#L42-L57`）。
-* 由 `push` 事件触发的长时间索引任务。
+* 由 `push` 事件触发的长时间索引任务（可驱动 Phase 6 的增量重索引）。
 
 **演示**：在公开 OSS 仓库安装，开 PR，评论 `@reposage where does the request enter routing?`，30 秒内收到带引用的回复。
 **退出指标**：演示仓库往返 P95 < 30 s；签名校验通过；限流处理已测。
-
----
-
-## 阶段 7 — 延伸目标（顺序任意）
-
-以下为可单独交付的改进；按当前痛点选收益最大的一项即可。
-
-* **Tantivy BM25**：用小型 Rust → Python 桥接把 rank-bm25 换成 Tantivy；预期索引吞吐约 10×。
-* **更多语言**：增加 Java、Rust 语法；验证符号图查询仍可用。
-* **增量重索引**：`push` 时只重解析变更文件；未动文件复用符号图行。
-* **缓存层**：按 `(repo_sha, question)` 缓存每题；重复问题 < 100 ms 返回。
-* **公开博客**：「用 Go 从零写 HNSW 我们学到了什么」，附 SIFT-1M 数据。
 
 ---
 
@@ -174,9 +176,9 @@ flowchart LR
 | 2 混合检索 RAG | ✅ | 2026-05 | `/ask` + HNSW/BM25/RRF |
 | 3 GraphRAG | ✅ | 2026-06 | Leiden + 社区摘要；50 题基准 |
 | 4 go-hnsw v2 | ✅ | 2026-06-29 | mmap 快照 + SIFT-1M 基准 |
-| 5 加固 + eval-gate | ⬜ | — | **当前焦点** |
-| 6 GitHub App | ⬜ | — | 依赖 Phase 5 |
-| 7 延伸目标 | ⬜ | — | Tantivy / 多语言 / 增量索引 |
+| 5 加固 + eval-gate | 🚧 | — | 进行中：OTel 埋点、go-hnsw 并发读、批量 upsert |
+| 6 延伸目标 | ⬜ | — | Tantivy / 多语言 / 增量索引 |
+| 7 GitHub App | ⬜ | — | 依赖 Phase 5/6 |
 
 ```mermaid
 flowchart LR
@@ -184,7 +186,7 @@ flowchart LR
   P1 --> P2["Phase 2 ✅"]
   P2 --> P3["Phase 3 ✅"]
   P2 --> P4["Phase 4 ✅"]
-  P3 --> P5["Phase 5 ⬜"]
+  P3 --> P5["Phase 5 🚧"]
   P4 --> P5
   P5 --> P6["Phase 6 ⬜"]
   P6 --> P7["Phase 7 ⬜"]
