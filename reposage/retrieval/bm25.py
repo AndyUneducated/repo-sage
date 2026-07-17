@@ -1,22 +1,13 @@
 """BM25 sparse retrieval over chunk text.
 
-Phase 2 ships ``rank-bm25`` (pure Python). Phase 7 swaps in Tantivy for
+Phase 2 ships ``rank-bm25`` (pure Python). Phase 6 swaps in Tantivy for
 ~10x indexing throughput; the `SparseRetriever` Protocol is the migration
-boundary.
-
-Tokenisation is intentionally aggressive — code identifiers like
-``User.login`` and ``require_auth`` need to be splittable into
-``[user, login]`` and ``[require, auth]`` to score against natural
-language questions. We split on every non-alphanumeric character and
-lowercase, then drop tokens shorter than 2 characters and tokens that are
-purely digit. This preserves ``check_password`` -> ``[check, password]``,
-``CreditCard`` -> ``[creditcard]`` (single CamelCase token; cheap and good
-enough for Phase 2), and ``HTTP/2`` -> ``[http, 2]`` -> ``[http]``.
+boundary and `reposage.retrieval.tokenize.tokenize` is the shared口径 both
+backends use so recall does not drift on the swap (DD-035).
 """
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,13 +15,9 @@ from pathlib import Path
 from rank_bm25 import BM25Okapi
 
 from reposage.retrieval.protocols import ScoredId
+from reposage.retrieval.tokenize import tokenize
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-
-
-def tokenize(text: str) -> list[str]:
-    """Tokenise code-shaped text into BM25 tokens."""
-    return [t.lower() for t in _TOKEN_RE.findall(text) if len(t) > 1 and not t.isdigit()]
+__all__ = ["BM25SparseRetriever", "tokenize"]
 
 
 class BM25SparseRetriever:

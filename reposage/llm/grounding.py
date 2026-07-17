@@ -42,10 +42,14 @@ CITATION_RE = re.compile(
     r"""
     \[
         \s*
-        (?:path\s*=\s*)?                          # optional `path=` prefix
-        (?P<quote>["'`])?                         # optional opening quote
-        (?P<path>[^\s\]:"'`]+(?:/[^\s\]:"'`]+)*)  # path token(s)
-        (?(quote)(?P=quote))                      # closing quote iff opened
+        (?:path\s*=\s*)?                            # optional `path=` prefix
+        (?P<quote>["'`])?                           # optional opening quote
+        # Path segments separated by `/`. `/` is excluded from the segment
+        # class so the separator is unambiguous — with `/` *inside* the class
+        # the `seg+(?:/seg+)*` shape backtracks catastrophically on inputs
+        # like `[/a/a/a…` (ReDoS). Each `/` now has exactly one parse.
+        (?P<path>[^\s\]:"'`/]+(?:/[^\s\]:"'`/]+)*)  # path token(s)
+        (?(quote)(?P=quote))                        # closing quote iff opened
         \s*:\s*
         (?P<lo>\d+)
         \s*-\s*

@@ -58,10 +58,22 @@ class Settings(BaseSettings):
     embed_device: Literal["cpu", "cuda", "mps"] = "cpu"
     embed_dim: int = 768
 
+    # ---- Indexing scale-out (Phase 6) ----
+    # Worker count for the parallel parse/chunk stage; embed stays single-worker
+    # + batched (GIL is released inside torch/bge). See phase-6-scale-out.md §5.1.
+    index_concurrency: int = 4
+    # Cross-file embed batch size handed to the encoder.
+    embed_batch_size: int = 32
+    # Rows buffered before a batched SQLite commit (amortises fsync; DD-036).
+    sqlite_commit_rows: int = 2000
+    # Sparse backend: rank-bm25 (default, no native dep) or tantivy (Phase 6).
+    sparse_backend: Literal["bm25", "tantivy"] = "bm25"
+
     # ---- Storage ----
     sqlite_path: Path = Field(default=Path("./data/reposage.db"))
     hnsw_data_dir: Path = Field(default=Path("./data/hnsw"))
     bm25_index_dir: Path = Field(default=Path("./data/bm25"))
+    tantivy_index_dir: Path = Field(default=Path("./data/tantivy"))
 
     # ---- HNSW (Go service) ----
     hnsw_grpc_addr: str = "localhost:50051"
@@ -73,10 +85,20 @@ class Settings(BaseSettings):
     # hnsw_data_dir when enabled by the launcher).
     hnsw_snapshot_path: Path | None = None
 
+    # ---- Answer cache (Phase 9) ----
+    # Opt-in like OTel (DD-030): keeps default behaviour (and the test suite)
+    # unchanged. When enabled, answered questions are cached under a key that
+    # includes the repo version (repo_meta head_sha / last_indexed_at) so a
+    # re-index invalidates stale answers (DD-046).
+    answer_cache_enabled: bool = False
+    answer_cache_size: int = 256
+
     # ---- GitHub App ----
     github_app_id: str | None = None
     github_app_private_key_path: Path | None = None
     github_webhook_secret: str | None = None
+    # @-mention handle the bot answers to (Phase 10).
+    github_bot_login: str = "reposage"
 
     # ---- Observability ----
     # Tracing is opt-in: span *instrumentation* is always compiled in (the

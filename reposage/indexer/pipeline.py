@@ -72,6 +72,7 @@ class IndexManifest:
     n_python_files: int = 0
     n_unsupported_files: int = 0
     n_parse_errors: int = 0
+    n_deleted_files: int = 0
     n_chunks: int = 0
     n_embeddings: int = 0
     n_symbols: int = 0
@@ -147,18 +148,7 @@ class IndexPipeline:
         graph_store = SQLiteSymbolGraphStore(self.sqlite_path)
         chunk_store = ChunkStore(self.sqlite_path)
         embeddings_store = EmbeddingsStore(self.sqlite_path)
-        # Always initialise the community schema, even with ``graphrag=False``.
-        # Downstream consumers (CLI, API, tests) treat the DB schema as a
-        # stable contract; making the tables conditional on a feature
-        # flag leaks the flag into every read path.
-        community_store_init = CommunityStore(self.sqlite_path)
-        try:
-            graph_store.init_schema()
-            chunk_store.init_schema()
-            embeddings_store.init_schema()
-            community_store_init.init_schema()
-        finally:
-            community_store_init.close()
+        self._ensure_schema(graph_store, chunk_store, embeddings_store)
         try:
             if force:
                 graph_store.clear_repo(self.repo_name)
@@ -166,9 +156,19 @@ class IndexPipeline:
                 # also evicts orphaned embedding rows for this repo.
                 chunk_store.clear_repo(self.repo_name)
 
+            # Incremental (non-force) delete detection (Phase 7): snapshot what
+            # the index currently knows, then track which files the walk still
+            # sees. Anything indexed-but-no-longer-walked was removed on disk.
+            indexed_before: set[str] = (
+                set(graph_store.all_files(self.repo_name)) if not force else set()
+            )
+            walked: set[str] = set()
+
             python_extractions: list[FileExtraction] = []
             for path in self._walk_files():
                 manifest.n_files += 1
+                if not force:
+                    walked.add(self._rel_path(path))
                 try:
                     self._index_file(
                         path=path,
@@ -183,6 +183,14 @@ class IndexPipeline:
                     manifest.failures.append(f"{path}: {exc!r}")
                     manifest.n_parse_errors += 1
                     logger.exception("indexing failed for %s", path)
+
+            if not force:
+                self._purge_deleted_files(
+                    graph_store=graph_store,
+                    chunk_store=chunk_store,
+                    removed=indexed_before - walked,
+                    manifest=manifest,
+                )
 
             if python_extractions:
                 with span(
@@ -216,6 +224,48 @@ class IndexPipeline:
             embeddings_store.close()
         manifest.elapsed_seconds = round(time.monotonic() - t0, 3)
         return manifest
+
+    def _ensure_schema(
+        self,
+        graph_store: SQLiteSymbolGraphStore,
+        chunk_store: ChunkStore,
+        embeddings_store: EmbeddingsStore,
+    ) -> None:
+        """Initialise every table this repo's index touches.
+
+        The community schema is created even with ``graphrag=False``:
+        downstream consumers (CLI, API, tests) treat the DB schema as a
+        stable contract, so making tables conditional on a feature flag would
+        leak the flag into every read path.
+        """
+        graph_store.init_schema()
+        chunk_store.init_schema()
+        embeddings_store.init_schema()
+        community_store_init = CommunityStore(self.sqlite_path)
+        try:
+            community_store_init.init_schema()
+        finally:
+            community_store_init.close()
+
+    def _purge_deleted_files(
+        self,
+        *,
+        graph_store: SQLiteSymbolGraphStore,
+        chunk_store: ChunkStore,
+        removed: set[str],
+        manifest: IndexManifest,
+    ) -> None:
+        """Drop index rows for files that vanished from disk (Phase 7).
+
+        ``removed`` is ``indexed_before - walked`` — comparing against
+        *walked* (not "successfully indexed") means a transient read error
+        does not evict a still-present file. ``delete_file`` drops the symbol
+        rows; ``delete_by_path`` drops chunks (embeddings cascade via FK).
+        """
+        for rel in sorted(removed):
+            graph_store.delete_file(self.repo_name, rel)
+            chunk_store.delete_by_path(self.repo_name, rel)
+            manifest.n_deleted_files += 1
 
     # ------------------------------------------------- Phase 3 GraphRAG
 
@@ -428,14 +478,26 @@ class IndexPipeline:
         parsed_rel = self._reroot(parsed, rel_path_str)
 
         chunks = self.chunker.chunk(self.repo_name, parsed_rel)
+        # Drop stale chunks for this file *unconditionally* before re-inserting.
+        # Doing this outside `if chunks:` matters when an edited file now
+        # produces zero chunks (e.g. emptied out) — otherwise its old chunks
+        # (and their cascaded embeddings) would linger. On the force path
+        # clear_repo already emptied the table so this is a cheap no-op.
+        chunk_store.delete_by_path(self.repo_name, rel_path_str)
         if chunks:
-            # Drop stale chunks for this file before inserting fresh ones.
-            # Embeddings cascade via the FK we set up in EmbeddingsStore.
-            chunk_store.delete_by_path(self.repo_name, rel_path_str)
             chunk_store.upsert(chunks, file_sha=file_sha)
             manifest.n_chunks += len(chunks)
             if self.embedder is not None:
                 manifest.n_embeddings += self._embed_and_store(chunks, embeddings_store)
+
+        # Incremental (non-force): a changed/added file's prior symbol rows must
+        # be cleared before the batched re-resolve re-adds current ones, or
+        # removed symbols linger and edge weights inflate (ON CONFLICT
+        # weight+1). Cached files returned early above, so this only fires for
+        # genuinely new/changed files; on force, clear_repo already ran.
+        if not force:
+            graph_store.delete_nodes_by_path(self.repo_name, rel_path_str)
+            graph_store.delete_edges_by_src_path(rel_path_str)
 
         module = module_fqn_for(self.repo, path)
         # Pass the rerooted ParseResult so the extractor stamps every RawDef /

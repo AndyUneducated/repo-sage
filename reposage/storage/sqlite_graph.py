@@ -277,6 +277,99 @@ class SQLiteSymbolGraphStore:
         ).fetchone()
         return row[0] if row else None
 
+    def get_repo_version(self, repo: str) -> str | None:
+        """A cache-busting version string for the repo (Phase 9 answer cache).
+
+        Combines ``head_sha`` (when a VCS sha is known) with
+        ``last_indexed_at`` so any re-index — which always bumps the
+        timestamp — invalidates cached answers (DD-046).
+        """
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT head_sha, last_indexed_at FROM repo_meta WHERE repo = ?",
+            (repo,),
+        ).fetchone()
+        if row is None:
+            return None
+        return f"{row[0] or ''}:{row[1]}"
+
+    def all_files(self, repo: str) -> dict[str, str]:
+        """Return ``{path: file_sha}`` for every indexed file of a repo.
+
+        This is the persisted view the incremental indexer diffs the working
+        tree against (Phase 7). ``nodes`` doubles as the symbol directory, and
+        ``file_meta`` as the file directory.
+        """
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT path, file_sha FROM file_meta WHERE repo = ?",
+            (repo,),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def module_fqns_for_paths(self, repo: str, paths: Iterable[str]) -> set[str]:
+        """Map repo-relative file paths to their module FQNs via ``nodes``."""
+        path_list = list(dict.fromkeys(paths))
+        if not path_list:
+            return set()
+        conn = self._connect()
+        placeholders = ",".join("?" * len(path_list))
+        rows = conn.execute(
+            f"SELECT fqn FROM nodes WHERE repo = ? AND kind = 'module' "
+            f"AND path IN ({placeholders})",
+            (repo, *path_list),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def paths_importing(self, modules: Iterable[str]) -> set[str]:
+        """Return the ``src_path`` of every file with an ``import`` edge into
+        one of ``modules`` — the L1 ripple set for incremental reindex (DD-038)."""
+        module_list = list(dict.fromkeys(modules))
+        if not module_list:
+            return set()
+        conn = self._connect()
+        placeholders = ",".join("?" * len(module_list))
+        rows = conn.execute(
+            f"SELECT DISTINCT src_path FROM edges WHERE kind = 'import' "
+            f"AND dst IN ({placeholders})",
+            tuple(module_list),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def delete_file(self, repo: str, path: str) -> None:
+        """Remove all symbol-graph rows a single file owns (Phase 7).
+
+        Drops the file's ``nodes`` (by repo+path), the ``edges`` it emits
+        (by ``src_path``), and its ``file_meta`` row. Chunks/embeddings are
+        owned by ``ChunkStore`` and cascade there; call
+        :meth:`ChunkStore.delete_by_path` alongside this.
+        """
+        conn = self._connect()
+        with conn:
+            conn.execute("DELETE FROM nodes WHERE repo = ? AND path = ?", (repo, path))
+            conn.execute("DELETE FROM edges WHERE src_path = ?", (path,))
+            conn.execute("DELETE FROM file_meta WHERE repo = ? AND path = ?", (repo, path))
+
+    def delete_edges_by_src_path(self, path: str) -> int:
+        """Delete every edge emitted from ``path`` (used before re-resolving it)."""
+        conn = self._connect()
+        with conn:
+            cur = conn.execute("DELETE FROM edges WHERE src_path = ?", (path,))
+            return cur.rowcount
+
+    def delete_nodes_by_path(self, repo: str, path: str) -> int:
+        """Delete every symbol node a single file owns (used before re-resolving).
+
+        Paired with :meth:`delete_edges_by_src_path` on the incremental path:
+        a changed file's *old* nodes/edges must be dropped before the batched
+        re-resolve re-adds the current ones, otherwise removed symbols linger
+        and ``upsert_edges``' ``weight = weight + 1`` double-counts (Phase 7).
+        """
+        conn = self._connect()
+        with conn:
+            cur = conn.execute("DELETE FROM nodes WHERE repo = ? AND path = ?", (repo, path))
+            return cur.rowcount
+
     def parse_status_counts(self, repo: str) -> dict[str, int]:
         conn = self._connect()
         rows = conn.execute(

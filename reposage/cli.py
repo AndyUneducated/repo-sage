@@ -100,6 +100,8 @@ def index(
     table.add_row("python files", str(manifest.n_python_files))
     table.add_row("unsupported files", str(manifest.n_unsupported_files))
     table.add_row("parse errors", str(manifest.n_parse_errors))
+    if manifest.n_deleted_files:
+        table.add_row("deleted files", str(manifest.n_deleted_files))
     table.add_row("chunks", str(manifest.n_chunks))
     table.add_row("embeddings", str(manifest.n_embeddings))
     table.add_row("symbols (nodes)", str(manifest.n_symbols))

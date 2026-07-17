@@ -46,6 +46,9 @@ The single-line view of the decisions that describe the system as it is **today*
 - DD-027 Algorithm 4 heuristic neighbour selection — implemented (Phase 4)
 - DD-028 Atomic snapshot writes (tmp + fsync + rename) — implemented (Phase 4)
 - DD-029 Snapshot via server lifecycle, not a gRPC RPC (for now) — active (Phase 4)
+- DD-030 OTel spans always compiled in, export is opt-in — active (Phase 5)
+- DD-031 `Index.AddBatch` batch upsert (single lock, all-or-nothing) — implemented (Phase 5)
+- DD-032 gRPC server RWMutex read path; per-layer shard lock deferred — active (Phase 5)
 
 ## DD-001: Self-built HNSW in Go (instead of `hnswlib` / Faiss)
 
@@ -441,3 +444,42 @@ The single-line view of the decisions that describe the system as it is **today*
 * **Why**: the roadmap's Phase 4 deliverables (mmap snapshot/restore, atomic writes, fast reload, bench) are fully satisfied at the lifecycle level. Keeping the proto frozen means the Python `hnsw_client.py` needs zero changes.
 * **Cost we accept**: no on-demand snapshot trigger from a running server until the RPC is added; snapshots happen at boot/exit only.
 * **Reversal cost**: low. Adding the RPC later is additive — the existing surface and the Python client are unaffected.
+
+## DD-030: OpenTelemetry spans are always compiled in; export is opt-in
+
+- **Status**: active
+- **Phase**: 5
+- **Last reviewed**: 2026-07-16
+- **Superseded-by**: —
+
+* **Choice**: instrumentation (`reposage.observability.otel.span()`) is threaded through the indexer stages, the query router, all three retrieval branches (hybrid dense/sparse/rerank, graph, community), and LLM completions, and is *always* present. The OTLP exporter, however, is only stood up when `Settings.otel_enabled` (env `REPOSAGE_OTEL_ENABLED`) is true — the API `lifespan` and the CLI `index` command both guard `setup_tracing` behind it.
+* **Alternatives**: (a) gate the instrumentation itself behind a flag / decorator so spans aren't created unless enabled; (b) always stand up the exporter and rely on the collector being absent.
+* **Why**: without a `TracerProvider`, `get_tracer` returns non-recording spans, so `start_as_current_span` / `set_attribute` cost a couple of contextvar writes — cheap enough to leave in every path. That means we never maintain two code shapes ("instrumented" vs "not"). Meanwhile always-connecting an OTLP exporter would spam connection-refused from every `reposage index`, test run, and fresh clone where no collector is listening; opt-in export keeps the default experience quiet while making full tracing one env var away. Span attributes are kept low-cardinality (counts, model names, route names — never chunk ids, paths, or question text) to protect the trace backend and avoid leaking user content.
+* **Cost we accept**: someone can forget to flip `REPOSAGE_OTEL_ENABLED` and get no traces in an environment where they wanted them; mitigated by `.env.example` docs and a planned startup log line.
+* **Reversal cost**: trivial. The seam is one context manager; removing spans is mechanical and changes no behaviour.
+
+## DD-031: `Index.AddBatch` — batch upsert under a single lock, all-or-nothing per call
+
+- **Status**: implemented
+- **Phase**: 5
+- **Last reviewed**: 2026-07-16
+- **Superseded-by**: —
+
+* **Choice**: add `hnsw.Index.AddBatch(ids, vecs) (int, error)` that validates every vector's dimension up front (a bad row fails the batch before any mutation), then takes the write lock **once** and inserts all N vectors. The gRPC `BulkLoad` handler and the SQLite cold-loader both buffer incoming vectors and flush through `AddBatch` in bounded chunks of 1024; the Python client gains `bulk_load()` (client-streaming). It is behaviourally identical to calling `Add` N times with the same seed and insertion order.
+* **Alternatives**: keep per-vector `Add` (one lock acquire/release per vector); expose a whole-stream in-memory batch (unbounded RAM).
+* **Why**: a single indexer goroutine streaming a repo's embeddings pays a lock hand-off between *every* insert; amortising the lock over 1024 inserts removes that overhead while the 1024 flush bound keeps a million-vector stream from materialising in RAM. Up-front dim validation preserves the "each BulkLoad RPC is all-or-nothing" contract the client retry logic relies on.
+* **Cost we accept**: one new public method to keep in lock-step with `Add`'s semantics (covered by an `AddBatch`-vs-sequential equivalence test).
+* **Reversal cost**: low. `AddBatch` is additive; `BulkLoad` / cold-load could fall back to per-vector `Add` in a few lines.
+
+## DD-032: gRPC server uses RWMutex for a concurrent read path; per-layer shard lock deferred
+
+- **Status**: active
+- **Phase**: 5
+- **Last reviewed**: 2026-07-16
+- **Superseded-by**: —
+
+* **Choice**: change `grpcserver.Server.mu` from `sync.Mutex` to `sync.RWMutex` — `Search` / `Stats` take the read lock (concurrent), `Add` / `BulkLoad` / `Snapshot` / `Close` / `LoadFromSQLite` take the write lock. The finer-grained "per-layer RWMutex / lock-free read" the roadmap mentions is deferred to Phase 9 (speed).
+* **Alternatives**: (a) keep the plain `Mutex` (serialises everything); (b) do the full per-layer / copy-on-write lock-free-read rewrite of the graph now.
+* **Why**: `hnsw.Index` was already `RWMutex` internally, so concurrent searches were safe at the algorithm level — but the server's outer plain `Mutex` serialised even reads, which was the real Phase 4 QPS bottleneck. Switching to `RWMutex` is a pure widening (read-read concurrency) with the old behaviour as a strict subset, so no regression risk. The per-layer shard lock only buys *write-while-read* concurrency, which the single-writer (index) / many-reader (serve) deployment barely exercises, and doing it correctly needs an atomic node array + copy-on-write neighbour slices — a sizeable, race-prone rewrite better done in Phase 9 against a QPS target and a stress harness.
+* **Cost we accept**: writes still briefly exclude in-flight reads; there is no write-while-read concurrency until Phase 9.
+* **Reversal cost**: low. The lock type is a localised change; the deferred rewrite is additive.

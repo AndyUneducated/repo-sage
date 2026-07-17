@@ -47,6 +47,7 @@ from reposage.retrieval.protocols import (
     Reranker,
 )
 from reposage.retrieval.reranker import CrossEncoderReranker, MockReranker
+from reposage.services.answer_cache import AnswerCache
 from reposage.services.retrieval_service import RetrievalService
 from reposage.storage.embeddings_store import EmbeddingsStore
 
@@ -177,10 +178,14 @@ def build_retrieval_service(
     the same wiring. Benchmarks construct their LLM separately because
     they own the temp index, but they reuse the same backend constructors.
     """
+    settings = get_settings()
     embedder = build_embedder()
     sparse = BM25SparseRetriever.from_sqlite(sqlite_path, repo=repo)
     dense = build_dense(embedder=embedder, sqlite_path=sqlite_path)
     community = build_community(embedder=embedder, sqlite_path=sqlite_path, repo=repo)
+    answer_cache = (
+        AnswerCache(capacity=settings.answer_cache_size) if settings.answer_cache_enabled else None
+    )
     return RetrievalService(
         sqlite_path=sqlite_path,
         embedder=embedder,
@@ -189,4 +194,5 @@ def build_retrieval_service(
         reranker=build_reranker(),
         llm=build_llm(),
         community=community,
+        answer_cache=answer_cache,
     )

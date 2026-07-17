@@ -31,5 +31,5 @@ python -m benchmarks.cross_file_qa.run_eval --repo-set defaults --route auto
 
 * Phase 0 — scaffolding only (this README + an empty `questions.jsonl`).
 * Phase 3 — first 50 questions land alongside the GraphRAG implementation.
-* Phase 5 — full 200 questions; results published in `docs/BENCHMARKS.md`.
-* Phase 6 — wired into CI as a regression gate (≥ baseline accuracy required to merge).
+* Phase 5 — eval-gate mechanism (threshold gating) live; full 200-question set deferred to Phase 8.
+* Phase 8 — full 200 questions + wired into CI as a regression gate (≥ baseline accuracy required to merge); results published in `docs/BENCHMARKS.md`.

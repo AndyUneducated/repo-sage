@@ -89,7 +89,7 @@ For `graph`-routed questions we never call the embedder. We resolve the named sy
 For semantic questions we run two retrievers in parallel:
 
 * **Dense**: `go-hnsw` with `M=16, efConstruction=200, efSearch=64` (Malkov & Yashunin 2018 defaults).
-* **Sparse**: BM25 over code tokens (rank-bm25 in Phase 2; Tantivy in Phase 7).
+* **Sparse**: BM25 over code tokens (rank-bm25 in Phase 2; Tantivy in Phase 6).
 
 Both branches return their top-50 candidates, which are fused with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (`k=60`, the original paper's default). RRF is score-scale invariant — we do not need to normalise BM25 scores against cosine similarity. The fused top-20 then goes through `bge-reranker-v2-m3` for cross-encoder rescoring; the resulting top-8 is handed to the LLM.
 
@@ -108,8 +108,8 @@ The funnel narrows at each stage — `50 + 50 → 20 → 8` — so the expensive
 The Phase 2 plumbing is mediated by four `Protocol`s
 (`SparseRetriever`, `DenseRetriever`, `Reranker`, `LLMClient`) in
 [`reposage/retrieval/protocols.py`](../reposage/retrieval/protocols.py).
-This is the swap point for Phase 4 mmap HNSW, Phase 7 Tantivy, and
-sharding — no caller of `RetrievalService` changes.
+This is the swap point for Phase 4 mmap HNSW, Phase 6 Tantivy, and
+Phase 9 sharding — no caller of `RetrievalService` changes.
 
 ### 4.4 Citations and grounding
 Every chunk we hand to the LLM carries `(repo, path, start_line, end_line)`. The system prompt forbids citing anything that is not present in the context. A post-generation `verify_grounding` check (see [`reposage/llm/grounding.py`](../reposage/llm/grounding.py)) parses each `[path:lo-hi]` reference and confirms it is fully contained inside one of the retrieved chunks. If any citation is fabricated we regenerate the answer once with the offending references explicitly forbidden (DD-013); if the second attempt also fails, we strip the bad citations and return the cleaned answer marked `grounded=False`. The two-strikes ceiling is a deliberate cost guard.

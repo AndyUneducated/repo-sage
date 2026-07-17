@@ -81,7 +81,7 @@ Bottom line: Phase 4 set out to make go-hnsw *persistent and benchmarkable*, and
 
 ## 2. Cross-File QA benchmark — 200 questions
 
-* Set: `benchmarks/cross_file_qa/questions.jsonl` (Phase 3 ships 50, Phase 6 the full 200).
+* Set: `benchmarks/cross_file_qa/questions.jsonl` (Phase 3 ships 50, Phase 8 the full 200).
 * Repos: documented per row.
 * Metrics: citation grounding (exact), Ragas `answer_correctness`, Ragas `faithfulness`.
 * Models (Phase 4 weekly run): A (router) and B (answer) come from `LLM_MODEL`/`ROUTER_MODEL`. The local-default-Ollama setup (DD-014) is for development; the eval-gate weekly cron runs against a hosted A/B pair such as `openai/gpt-4o-mini` (router) and `anthropic/claude-sonnet-4` (answer), with C (judge) held out (e.g. `openai/gpt-4o`).
@@ -98,7 +98,7 @@ The headline number is `auto - hybrid-only` on the 200-question total: the lift 
 
 ## 3. Latency budget — `/ask` end-to-end
 
-Measured on the GitHub App round-trip (webhook → answer comment), broken down by stage. Filled in during Phase 4.
+Measured on the GitHub App round-trip (webhook → answer comment), broken down by stage. Filled in during Phase 9 (latency pass) / Phase 10 (App round-trip).
 
 | Stage | P50 (ms) | P99 (ms) |
 | --- | --- | --- |

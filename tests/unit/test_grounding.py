@@ -50,6 +50,25 @@ def test_extract_rejects_non_positive() -> None:
     assert extract_citations("[x.py:0-5]") == []
 
 
+def test_extract_deep_paths_still_match() -> None:
+    # Multi-segment paths must still parse after the ReDoS hardening.
+    cites = extract_citations("[a/b/c/d/e/f.py:1-2]")
+    assert cites == [Citation(path="a/b/c/d/e/f.py", start_line=1, end_line=2)]
+
+
+def test_extract_is_not_catastrophic_on_slash_bomb() -> None:
+    """Regression guard for the CITATION_RE ReDoS (path segment class must
+    exclude `/`). The pre-fix regex took ~seconds→minutes on this input; the
+    fixed one is microseconds. A generous wall-clock ceiling catches a revert
+    without being flaky."""
+    import time  # noqa: PLC0415
+
+    evil = "[" + "/a" * 60 + "!"  # unterminated citation, 60 slash segments
+    t0 = time.monotonic()
+    assert extract_citations(evil) == []
+    assert time.monotonic() - t0 < 1.0
+
+
 def test_grounded_within_chunk() -> None:
     chunks = [_chunk("a.py", 10, 20)]
     result = verify_grounding("yes [a.py:12-15] indeed", chunks)

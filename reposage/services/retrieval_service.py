@@ -17,7 +17,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from reposage.indexer.embedder import EmbeddingProvider
 from reposage.llm.grounding import (
@@ -40,6 +40,9 @@ from reposage.retrieval.protocols import (
 from reposage.retrieval.router import QueryRoute, QueryRouter
 from reposage.storage.community_store import CommunityStore
 from reposage.storage.sqlite_graph import SQLiteSymbolGraphStore
+
+if TYPE_CHECKING:
+    from reposage.services.answer_cache import AnswerCache
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +144,14 @@ class RetrievalService:
         top_k: int = 8,
         community_top_k: int = 5,
         community_chunks_per_hit: int = 4,
+        answer_cache: AnswerCache | None = None,
     ) -> None:
         self.sqlite_path = sqlite_path
         self.llm = llm
         self.top_k = top_k
+        # Phase 9 (DD-046): opt-in, versioned answer cache. None keeps the
+        # default cold path (and the test suite) byte-for-byte unchanged.
+        self._answer_cache = answer_cache
         self.community_top_k = community_top_k
         self.community_chunks_per_hit = community_chunks_per_hit
         self.router = router or QueryRouter(llm=llm)
@@ -161,6 +168,59 @@ class RetrievalService:
         self.community = community
 
     async def answer(
+        self,
+        question: str,
+        *,
+        repo: str | None = None,
+        route_hint: str | None = None,
+        top_k: int | None = None,
+    ) -> AnswerResult:
+        """Public entry point with the optional Phase 9 answer cache in front.
+
+        Caching happens on the *inputs* (question/repo/route_hint/top_k) so a
+        hit also skips routing — including the router LLM call. Only grounded
+        answers are cached; a regenerated/ungrounded result is never pinned.
+        """
+        cache = self._answer_cache
+        if cache is None:
+            return await self._answer_uncached(
+                question, repo=repo, route_hint=route_hint, top_k=top_k
+            )
+
+        from reposage.services.answer_cache import AnswerCache  # noqa: PLC0415
+
+        effective_top_k = top_k or self.top_k
+        key = AnswerCache.make_key(
+            repo=repo,
+            repo_version=self._repo_version(repo),
+            question=question,
+            route_hint=route_hint,
+            top_k=effective_top_k,
+            model=self.llm.model,
+        )
+        hit = cache.get(key)
+        if hit is not None:
+            logger.debug("answer cache hit repo=%s route_hint=%s", repo, route_hint)
+            return hit
+        result = await self._answer_uncached(
+            question, repo=repo, route_hint=route_hint, top_k=top_k
+        )
+        if result.grounded:
+            cache.put(key, result)
+        return result
+
+    def _repo_version(self, repo: str | None) -> str | None:
+        """Read the repo's cache-busting version (head_sha / last_indexed_at)."""
+        if repo is None:
+            return None
+        store = SQLiteSymbolGraphStore(self.sqlite_path)
+        try:
+            store.init_schema()
+            return store.get_repo_version(repo)
+        finally:
+            store.close()
+
+    async def _answer_uncached(
         self,
         question: str,
         *,

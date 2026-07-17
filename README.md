@@ -138,7 +138,7 @@ flowchart LR
 最终落地的索引产物：
 
 - **`go-hnsw`** —— 稠密向量（默认 `M=16, efConstruction=200, efSearch=64`），冷启动时从 SQLite 的 `embeddings` 表流式 `Add` 重建。
-- **BM25** —— 稀疏检索（Phase 2 用 rank-bm25，Phase 5/7 换 Tantivy）。
+- **BM25** —— 稀疏检索（Phase 2 用 rank-bm25，Phase 6 换 Tantivy）。
 - **SQLite symbol graph** —— 确定性事实查询的来源；完整 schema 见 [`docs/INDEX_SCHEMA.md`](docs/INDEX_SCHEMA.md)。
 - **Community summaries** —— 模块级归纳问题（community 路径）的来源。
 
