@@ -1,56 +1,56 @@
-# Phase 2 — 检索 v1：端到端混合 RAG（技术方案）
+# Phase 2 — Retrieval v1: end-to-end hybrid RAG (technical design)
 
-> 本文档与 [`docs/ROADMAP.md`](../ROADMAP.md) 第 2 阶段对应。
-> 创建日期：2026-05-24。
-> 同期讨论副本另存于 `~/.cursor/plans/phase-2_hybrid_rag_*.plan.md`。
+> Corresponds to stage 2 of [`docs/ROADMAP.md`](../ROADMAP.md).
+> Created: 2026-05-24.
+> A contemporaneous discussion copy lives at `~/.cursor/plans/phase-2_hybrid_rag_*.plan.md`.
 
-## 1. 目标对齐
+## 1. Goal alignment
 
-路线图 Phase 2 退出指标：
+Roadmap Phase 2 exit criteria:
 
-- `reposage ask --route hybrid` 与 `POST /ask` 返回带 `[path:start-end]` 引用的答案。
-- 链路：`bge-en-v1.5` 嵌入 → 自建 `go-hnsw` gRPC（M=16, efC=200, efS=64）+ `rank-bm25` → RRF 融合（k=60）→ `bge-reranker-v2-m3` 重排 → LiteLLM 生成 → Citation grounding 校验。
-- 50 kLOC 仓库 P50 端到端 < 1.5 s；20 题手工质检通过率 100 %。
-- 演示：`langchain_classic` 上正确回答 “How is the session timeout configured?”。
+- `reposage ask --route hybrid` and `POST /ask` return answers with `[path:start-end]` citations.
+- Pipeline: `bge-en-v1.5` embed → in-house `go-hnsw` gRPC (M=16, efC=200, efS=64) + `rank-bm25` → RRF fusion (k=60) → `bge-reranker-v2-m3` rerank → LiteLLM generate → citation grounding.
+- 50 kLOC repo P50 end-to-end < 1.5 s; 20-question hand QA pass rate 100%.
+- Demo: on `langchain_classic`, correctly answer “How is the session timeout configured?”.
 
-`hybrid` 路径的完整链路（每一步把候选数收窄）：
+Full `hybrid` path (each step narrows the candidate set):
 
 ```mermaid
 flowchart LR
   Q["question"] --> E["embed<br/>bge-en-v1.5"]
   E --> Dense["dense<br/>go-hnsw"]
   Q --> Sparse["sparse<br/>rank-bm25"]
-  Dense -->|top-50| RRF["RRF 融合<br/>k=60"]
+  Dense -->|top-50| RRF["RRF fusion<br/>k=60"]
   Sparse -->|top-50| RRF
   RRF -->|top-20| Rerank["reranker<br/>bge-reranker-v2-m3"]
-  Rerank -->|top-8| LLM["LiteLLM 生成"]
-  LLM --> Ground["citation grounding<br/>校验引用真实存在"]
+  Rerank -->|top-8| LLM["LiteLLM generate"]
+  LLM --> Ground["citation grounding<br/>citations must exist"]
   Ground --> Resp["AskResponse"]
 ```
 
-## 2. 行业标准对齐
+## 2. Industry-standard alignment
 
-| 选择 | 引用 / 默认 |
+| Choice | Citation / default |
 | --- | --- |
-| HNSW 参数 | M=16, efConstruction=200, efSearch=64（Malkov & Yashunin 2018 推荐） |
-| RRF k | 60（Cormack et al. 2009 标准） |
-| 嵌入模型 | bge-en-v1.5 768-d（FlagEmbedding 官方） |
-| Reranker | bge-reranker-v2-m3（轻量 cross-encoder） |
-| LLM 抽象 | LiteLLM（DD-007） |
-| IPC | gRPC + Protobuf（DD-001 自建 HNSW 已留口） |
-| HTTP 契约 | Pydantic v2，响应保留 `graph_context: Optional` 字段给 Phase 3 |
+| HNSW params | M=16, efConstruction=200, efSearch=64 (Malkov & Yashunin 2018) |
+| RRF k | 60 (Cormack et al. 2009) |
+| Embedding model | bge-en-v1.5 768-d (FlagEmbedding official) |
+| Reranker | bge-reranker-v2-m3 (lightweight cross-encoder) |
+| LLM abstraction | LiteLLM (DD-007) |
+| IPC | gRPC + Protobuf (DD-001; in-house HNSW already stubbed) |
+| HTTP contract | Pydantic v2; response keeps `graph_context: Optional` for Phase 3 |
 
-## 3. 前后向兼容设计
+## 3. Forward- and backward-compatible design
 
-- 四个 Protocol（[`reposage/retrieval/protocols.py`](../../reposage/retrieval/protocols.py)）：`SparseRetriever`、`DenseRetriever`、`Reranker`、`LLMClient`。Phase 7 的 Tantivy、Phase 5 的 mmap HNSW、Phase 8 的多副本，全部从这里换实现（DD-012）。
-- 嵌入存 SQLite，多 `model` 列并存，Phase 7 模型升级时灰度切换（DD-011）。
-- `embeddings.dim` 显式存盘并在启动时校验，模型尺寸不一致即报错。
-- Phase 5 mmap：写一次性 `export-snapshot` 工具从 `embeddings` 表导出 arena，不需要回改 Phase 2 的代码。
-- 单测用 [`LocalDenseIndex`](../../reposage/retrieval/local_dense.py)（纯 numpy 线性扫描）跳过 Go gRPC，CI Python 阶段不需要 Go 工具链；`make test-grpc` 才启动真实 server。
+- Four Protocols ([`reposage/retrieval/protocols.py`](../../reposage/retrieval/protocols.py)): `SparseRetriever`, `DenseRetriever`, `Reranker`, `LLMClient`. Phase 7 Tantivy, Phase 5 mmap HNSW, and Phase 8 replicas all swap implementations here (DD-012).
+- Embeddings live in SQLite with multiple `model` columns coexisting so Phase 7 can grey-switch models (DD-011).
+- `embeddings.dim` is stored explicitly and checked at startup; a model-size mismatch is an error.
+- Phase 5 mmap: a one-shot `export-snapshot` tool dumps the arena from the `embeddings` table; Phase 2 code does not need a later rewrite.
+- Unit tests use [`LocalDenseIndex`](../../reposage/retrieval/local_dense.py) (pure numpy linear scan) and skip Go gRPC, so the CI Python stage needs no Go toolchain; `make test-grpc` starts the real server.
 
-## 4. 数据流（含原子性边界）
+## 4. Data flow (including atomicity)
 
-`reposage index` Phase 1 已在写 `chunks`。Phase 2 在同一 SQLite 事务里追加 `embeddings`：
+`reposage index` already writes `chunks` in Phase 1. Phase 2 appends `embeddings` in the same SQLite transaction:
 
 ```sql
 CREATE TABLE IF NOT EXISTS embeddings(
@@ -63,64 +63,64 @@ CREATE TABLE IF NOT EXISTS embeddings(
 CREATE INDEX IF NOT EXISTS embeddings_model ON embeddings(model);
 ```
 
-`hnsw-server` 启动：批量 `SELECT chunk_id, vector FROM embeddings WHERE model=?` → 调 `Add(idx, vec)` 灌入；启动 1× O(N log N) HNSW 构建。
+`hnsw-server` startup: batch `SELECT chunk_id, vector FROM embeddings WHERE model=?` → `Add(idx, vec)`; one O(N log N) HNSW build at boot.
 
 ```mermaid
 flowchart LR
-  subgraph Index["reposage index（写入期）"]
-    File["每个文件"] --> Chunk["chunks<br/>(Phase 1 已写)"]
+  subgraph Index["reposage index (write path)"]
+    File["each file"] --> Chunk["chunks<br/>(Phase 1 already writes)"]
     Chunk --> Embed["embedder.embed"]
-    Embed --> Emb[("embeddings<br/>同一事务写入")]
+    Embed --> Emb[("embeddings<br/>same transaction")]
   end
-  subgraph Boot["hnsw-server（启动期）"]
-    Emb -.->|"冷启动: 批量 SELECT"| Load["Add(idx, vec)"]
-    Load --> Graph["HNSW 图<br/>(内存)"]
+  subgraph Boot["hnsw-server (startup)"]
+    Emb -.->|"cold start: batch SELECT"| Load["Add(idx, vec)"]
+    Load --> Graph["HNSW graph<br/>(in memory)"]
   end
 ```
 
-> **原子性**：`chunks` 与 `embeddings` 在同一个 SQLite 事务里写入，崩溃时不会出现"有 chunk 没向量"的半状态（half-state）。
+> **Atomicity**: `chunks` and `embeddings` are written in one SQLite transaction, so a crash cannot leave a half-state of “chunk without vector”.
 
-## 5. 关键文件
+## 5. Key files
 
-### 5.1 新建（Python）
+### 5.1 New (Python)
 
-- [`reposage/retrieval/protocols.py`](../../reposage/retrieval/protocols.py)：`SparseRetriever`/`DenseRetriever`/`Reranker`/`LLMClient` Protocol。
-- [`reposage/storage/embeddings_store.py`](../../reposage/storage/embeddings_store.py)：embeddings 表 CRUD + 模型/维度校验。
-- [`reposage/retrieval/local_dense.py`](../../reposage/retrieval/local_dense.py)：`LocalDenseIndex`（numpy 线性扫描）。
-- [`reposage/services/retrieval_service.py`](../../reposage/services/retrieval_service.py)：`RetrievalService` 编排器。
-- [`reposage/llm/grounding.py`](../../reposage/llm/grounding.py)：`extract_citations` + `verify_grounding`，未引用必删（drop-and-regenerate）。
-- [`reposage/proto/hnsw_pb2.py`](../../reposage/proto/hnsw_pb2.py)（buf/protoc 生成）。
+- [`reposage/retrieval/protocols.py`](../../reposage/retrieval/protocols.py): `SparseRetriever` / `DenseRetriever` / `Reranker` / `LLMClient` Protocol.
+- [`reposage/storage/embeddings_store.py`](../../reposage/storage/embeddings_store.py): embeddings table CRUD + model/dim checks.
+- [`reposage/retrieval/local_dense.py`](../../reposage/retrieval/local_dense.py): `LocalDenseIndex` (numpy linear scan).
+- [`reposage/services/retrieval_service.py`](../../reposage/services/retrieval_service.py): `RetrievalService` orchestrator.
+- [`reposage/llm/grounding.py`](../../reposage/llm/grounding.py): `extract_citations` + `verify_grounding`; uncited claims are dropped and regenerated.
+- [`reposage/proto/hnsw_pb2.py`](../../reposage/proto/hnsw_pb2.py) (generated by buf/protoc).
 
-### 5.2 实现（Python，桩件 → 正式）
+### 5.2 Implementation (Python, stub → real)
 
-- [`reposage/indexer/embedder.py`](../../reposage/indexer/embedder.py)：`BgeEmbedder`（懒加载 sentence-transformers）+ `HashEmbedder`（CI/测试 fake）。
-- [`reposage/indexer/pipeline.py`](../../reposage/indexer/pipeline.py)：在 `_index_file` 后对新增 chunks 调 `embedder.embed` → `embeddings_store.upsert`，与 chunks 共用一次事务。
-- [`reposage/retrieval/hnsw_client.py`](../../reposage/retrieval/hnsw_client.py)：gRPC `DenseRetriever` 实现；启动时调 `Stats` 验证 dim 与配置一致。
-- [`reposage/retrieval/bm25.py`](../../reposage/retrieval/bm25.py)：`SparseRetriever` 实现；分词 `[A-Za-z0-9]+` → 小写 → 长度 ≥ 2 且非纯数字；启动时全量 scan `chunks` 建内存倒排。
-- [`reposage/retrieval/hybrid.py`](../../reposage/retrieval/hybrid.py)：并行 dense/sparse top-50 → RRF k=60 融合 → 取 top-20 → 重排 → top-8。
-- [`reposage/retrieval/reranker.py`](../../reposage/retrieval/reranker.py)：`CrossEncoderReranker`（生产）+ `MockReranker`（CI）。
-- [`reposage/llm/client.py`](../../reposage/llm/client.py)：`LiteLLMClient`（生产）+ `MockLLMClient`（CI 无密钥）。
-- [`reposage/llm/prompts.py`](../../reposage/llm/prompts.py)：系统提示明令 “只能基于 `<retrieved_chunk>`，引用必须形如 `[path:start-end]`”。
-- [`reposage/retrieval/router.py`](../../reposage/retrieval/router.py)：扩展 `route`：先跑 graph fast-path，未命中走 LLM intent 分类（少量 token，输出 `graph|hybrid|community`）。
-- [`reposage/api/routes/ask.py`](../../reposage/api/routes/ask.py)：`POST /ask` → `RetrievalService.answer(question)` → 返回 `{answer, citations[], route, latency_ms, grounded, graph_context}`。
-- [`reposage/cli.py`](../../reposage/cli.py)：`ask --route hybrid/auto/graph/community` 走 `RetrievalService`；新增 `reposage serve` 启动 FastAPI（uvicorn）。
+- [`reposage/indexer/embedder.py`](../../reposage/indexer/embedder.py): `BgeEmbedder` (lazy sentence-transformers) + `HashEmbedder` (CI/test fake).
+- [`reposage/indexer/pipeline.py`](../../reposage/indexer/pipeline.py): after `_index_file`, `embedder.embed` new chunks → `embeddings_store.upsert`, same transaction as chunks.
+- [`reposage/retrieval/hnsw_client.py`](../../reposage/retrieval/hnsw_client.py): gRPC `DenseRetriever`; on start, `Stats` checks dim vs config.
+- [`reposage/retrieval/bm25.py`](../../reposage/retrieval/bm25.py): `SparseRetriever`; tokenize `[A-Za-z0-9]+` → lowercase → length ≥ 2 and not all-digit; at start, full scan of `chunks` to build an in-memory inverted index.
+- [`reposage/retrieval/hybrid.py`](../../reposage/retrieval/hybrid.py): parallel dense/sparse top-50 → RRF k=60 → top-20 → rerank → top-8.
+- [`reposage/retrieval/reranker.py`](../../reposage/retrieval/reranker.py): `CrossEncoderReranker` (prod) + `MockReranker` (CI).
+- [`reposage/llm/client.py`](../../reposage/llm/client.py): `LiteLLMClient` (prod) + `MockLLMClient` (CI, no key).
+- [`reposage/llm/prompts.py`](../../reposage/llm/prompts.py): system prompt requires answers only from `<retrieved_chunk>`, citations must look like `[path:start-end]`.
+- [`reposage/retrieval/router.py`](../../reposage/retrieval/router.py): extend `route`: graph fast-path first; on miss, LLM intent classification (few tokens, output `graph|hybrid|community`).
+- [`reposage/api/routes/ask.py`](../../reposage/api/routes/ask.py): `POST /ask` → `RetrievalService.answer(question)` → `{answer, citations[], route, latency_ms, grounded, graph_context}`.
+- [`reposage/cli.py`](../../reposage/cli.py): `ask --route hybrid/auto/graph/community` goes through `RetrievalService`; new `reposage serve` starts FastAPI (uvicorn).
 
-### 5.3 新建（Go）
+### 5.3 New (Go)
 
-- [`proto/hnsw.proto`](../../proto/hnsw.proto)：`Add(id, vec)`、`BulkLoad(stream)`、`Search(vec, k, ef)`、`Stats() -> (size, dim, model, M, efC, efS)`。
-- [`go-hnsw/cmd/server/main.go`](../../go-hnsw/cmd/server/main.go)：flags `-addr -db -model -dim -m -ef-construction -ef-search`，启动时打开 SQLite，BulkLoad 后开始服务。
-- [`go-hnsw/internal/grpcserver/server.go`](../../go-hnsw/internal/grpcserver/server.go)：把 gRPC 请求映射到 `hnsw.Index`。
-- [`go-hnsw/internal/grpcserver/sqlite_load.go`](../../go-hnsw/internal/grpcserver/sqlite_load.go)：从 `embeddings` 表冷启动加载（pure-Go SQLite 驱动）。
-- [`go-hnsw/insert.go`](../../go-hnsw/insert.go) / [`search.go`](../../go-hnsw/search.go) / [`internal/heap/heap.go`](../../go-hnsw/internal/heap/heap.go)：补齐 Algorithm 1 / 5。
+- [`proto/hnsw.proto`](../../proto/hnsw.proto): `Add(id, vec)`, `BulkLoad(stream)`, `Search(vec, k, ef)`, `Stats() -> (size, dim, model, M, efC, efS)`.
+- [`go-hnsw/cmd/server/main.go`](../../go-hnsw/cmd/server/main.go): flags `-addr -db -model -dim -m -ef-construction -ef-search`; open SQLite at start, BulkLoad, then serve.
+- [`go-hnsw/internal/grpcserver/server.go`](../../go-hnsw/internal/grpcserver/server.go): map gRPC requests onto `hnsw.Index`.
+- [`go-hnsw/internal/grpcserver/sqlite_load.go`](../../go-hnsw/internal/grpcserver/sqlite_load.go): cold-start load from `embeddings` (pure-Go SQLite driver).
+- [`go-hnsw/insert.go`](../../go-hnsw/insert.go) / [`search.go`](../../go-hnsw/search.go) / [`internal/heap/heap.go`](../../go-hnsw/internal/heap/heap.go): fill in Algorithm 1 / 5.
 
-### 5.4 配置 / 工具
+### 5.4 Config / tooling
 
-- [`pyproject.toml`](../../pyproject.toml)：补 `sentence-transformers`、`grpcio`、`grpcio-tools`、`protobuf`、`fastapi`、`uvicorn`、`litellm`、`rank-bm25`。
-- [`Makefile`](../../Makefile)：`proto-gen`、`hnsw-build`、`hnsw-run`、`bench-rag`、`bench-rag LARGE=1`、`test-grpc`。
-- [`.github/workflows/ci-go.yml`](../../.github/workflows/ci-go.yml)：构建 `cmd/server`，跑 `go test ./... -race`。
-- [`.github/workflows/eval-gate.yml`](../../.github/workflows/eval-gate.yml)：每 PR 都跑 `bench-rag`（mock LLM，免密钥）；周一 cron 跑真实 LLM。
+- [`pyproject.toml`](../../pyproject.toml): add `sentence-transformers`, `grpcio`, `grpcio-tools`, `protobuf`, `fastapi`, `uvicorn`, `litellm`, `rank-bm25`.
+- [`Makefile`](../../Makefile): `proto-gen`, `hnsw-build`, `hnsw-run`, `bench-rag`, `bench-rag LARGE=1`, `test-grpc`.
+- [`.github/workflows/ci-go.yml`](../../.github/workflows/ci-go.yml): build `cmd/server`, run `go test ./... -race`.
+- [`.github/workflows/eval-gate.yml`](../../.github/workflows/eval-gate.yml): every PR runs `bench-rag` (mock LLM, no key); Monday cron runs the real LLM.
 
-## 6. /ask 响应契约（前向兼容）
+## 6. /ask response contract (forward-compatible)
 
 ```json
 {
@@ -133,57 +133,57 @@ flowchart LR
   "grounded": true,
   "latency_ms": {
     "embed_ms": 0, "retrieve_ms": 1, "rerank_ms": 0, "llm_ms": 1, "total_ms": 2
-  },
+  ],
   "graph_context": null
 }
 ```
 
-`graph_context` 字段保留给 Phase 3 GraphRAG，Phase 2 始终为 `null`。
+`graph_context` is reserved for Phase 3 GraphRAG; Phase 2 always sends `null`.
 
-## 7. 测试矩阵
+## 7. Test matrix
 
-### 单测（`pytest tests/unit`，不依赖 Go / 大模型）
+### Unit (`pytest tests/unit`, no Go / no large models)
 
-- `test_embeddings_store.py`：dim/model 校验、CASCADE 删除、批流式读取。
-- `test_local_dense.py`：纯 numpy 实现的 top-k 召回正确、零向量保护。
-- `test_bm25.py`：分词器、`User.login` → `["user", "login"]`、SQLite 冷启动。
-- `test_hybrid_rrf.py`：RRF 边界（同序、不同序、空输入、k 影响）。
-- `test_grounding.py`：合法引用通过 / 越界 / 不存在 path / 行号反转。
-- `test_router_llm.py`：`mock` LLMClient 决策 `hybrid`/`graph`/`community`，并校验 LLM 失败时的 hybrid 兜底。
-- `test_prompts.py`：模板填充与去毒（`Never invent`）。
-- `test_router.py`：保留 Phase 1 启发式行为，`route_sync` 现在为非符号问题返回 `hybrid`（兜底）。
+- `test_embeddings_store.py`: dim/model checks, CASCADE delete, batched streaming reads.
+- `test_local_dense.py`: numpy top-k recall is correct; zero-vector guard.
+- `test_bm25.py`: tokenizer, `User.login` → `["user", "login"]`, SQLite cold start.
+- `test_hybrid_rrf.py`: RRF edges (same order, different order, empty input, effect of k).
+- `test_grounding.py`: valid citations pass / out of range / missing path / reversed lines.
+- `test_router_llm.py`: `mock` LLMClient chooses `hybrid`/`graph`/`community`; LLM failure falls back to hybrid.
+- `test_prompts.py`: template fill and the `Never invent` anti-hallucination wording.
+- `test_router.py`: keep Phase 1 heuristics; `route_sync` now returns `hybrid` for non-symbolic questions (fallback).
 
-### 集成
+### Integration
 
-- `tests/integration/test_ask_e2e.py`：`tiny_python_repo` + `HashEmbedder` + `LocalDenseIndex` + `MockLLMClient` 端到端：`RetrievalService.answer` 返回合法引用、`POST /ask` 走 FastAPI TestClient、grounder 拒绝伪造引用。
-- `tests/integration/test_grpc_hnsw.py`（`pytest.mark.requires_go_hnsw`）：启动子进程 `cmd/server`，从 `embeddings` 冷加载后能命中已知 chunk。
-- `tests/integration/test_rag_bench.py`：把 20 题质检嵌进 pytest，断言 P50 < 1500 ms、citation 100 % 合法、recall@8 ≥ 0.80。
+- `tests/integration/test_ask_e2e.py`: `tiny_python_repo` + `HashEmbedder` + `LocalDenseIndex` + `MockLLMClient` end-to-end: `RetrievalService.answer` returns valid citations, `POST /ask` via FastAPI TestClient, grounder rejects fabricated citations.
+- `tests/integration/test_grpc_hnsw.py` (`pytest.mark.requires_go_hnsw`): spawn `cmd/server` subprocess; after cold-load from `embeddings`, hits a known chunk.
+- `tests/integration/test_rag_bench.py`: embed the 20-question QA into pytest; assert P50 < 1500 ms, citations 100% valid, recall@8 ≥ 0.80.
 
 ### Bench
 
-- [`benchmarks/rag/python_20.jsonl`](../../benchmarks/rag/python_20.jsonl)：20 题手工 ground truth（问题、期望命中文件集合）。
-- [`benchmarks/rag/run_eval.py`](../../benchmarks/rag/run_eval.py)：跑 `tiny_python_repo`（默认）或 `--large`（50 kLOC，`REPOSAGE_LARGE_REPO` 指定）。输出 P50/P95 延迟、文件级 recall@k、citation 合法率。
-- 当前指标：P50 ≈ 0 ms（mock LLM）/ recall@8 = 1.000 / citation 合法率 = 1.000，留出 1.5 s 头部预算给真实 LLM。
+- [`benchmarks/rag/python_20.jsonl`](../../benchmarks/rag/python_20.jsonl): 20 hand-labeled ground-truth items (question, expected hit files).
+- [`benchmarks/rag/run_eval.py`](../../benchmarks/rag/run_eval.py): run `tiny_python_repo` (default) or `--large` (50 kLOC, `REPOSAGE_LARGE_REPO`). Report P50/P95 latency, file-level recall@k, citation validity rate.
+- Current numbers: P50 ≈ 0 ms (mock LLM) / recall@8 = 1.000 / citation validity = 1.000, leaving a 1.5 s headroom budget for a real LLM.
 
-## 8. 非目标（Phase 2 不做）
+## 8. Non-goals (not in Phase 2)
 
-- 持久化 HNSW（Phase 5）。
-- 增量删除（Phase 7）。
-- HNSW 多线程构建/查询（Phase 6）。
-- Tantivy（Phase 7）。
-- TS/Go 实际嵌入（与 Phase 1 一致，仅在 file_meta 标 `unsupported`，跳过 embedding）。
-- 流式响应（Phase 6）。
+- Persistent HNSW (Phase 5).
+- Incremental delete (Phase 7).
+- Multi-threaded HNSW build/search (Phase 6).
+- Tantivy (Phase 7).
+- Real TS/Go embeddings (same as Phase 1: mark `unsupported` in file_meta, skip embedding).
+- Streaming responses (Phase 6).
 
-## 9. 风险与对策
+## 9. Risks and mitigations
 
-- **Reranker 在 CPU 上拖慢 P50**：限制重排候选 ≤ 20；超出时打 metric 在日志报警；Phase 6 才上 batch。
-- **冷启动 BM25 全量 scan 慢**：Phase 2 仓库 ≤ 50 kLOC，~10 k chunks，scan < 200 ms；超过则在 [`reposage/retrieval/bm25.py`](../../reposage/retrieval/bm25.py) 改用 `pyarrow` 流式读，但 Phase 2 不做。
-- **CI 没有 LLM 密钥**：默认走 `mock` provider，仅 `eval-gate` 周一 cron 加 `OPENAI_API_KEY` 跑真实 20 题质量门。
-- **gRPC 连不上**：CLI 启动时 `Stats()` ping 失败 → 抛出 “server dim X != client expected Y” 报错并提示 `make hnsw-run`。
+- **Reranker on CPU blows P50**: cap rerank candidates at ≤ 20; log a metric alarm if exceeded; batching waits for Phase 6.
+- **Cold-start BM25 full scan is slow**: Phase 2 repos are ≤ 50 kLOC, ~10 k chunks, scan < 200 ms; if larger, switch [`reposage/retrieval/bm25.py`](../../reposage/retrieval/bm25.py) to `pyarrow` streaming reads — not in Phase 2.
+- **CI has no LLM key**: default `mock` provider; only `eval-gate` Monday cron adds `OPENAI_API_KEY` for the real 20-question quality gate.
+- **gRPC unreachable**: CLI `Stats()` ping failure → raise “server dim X != client expected Y” and hint `make hnsw-run`.
 
-## 10. 演示命令
+## 10. Demo commands
 
-### 本地一键端到端（默认 mock LLM，无需密钥）
+### Local one-shot end-to-end (default mock LLM, no key)
 
 ```bash
 REPOSAGE_PROFILE=mock \
@@ -193,23 +193,23 @@ REPOSAGE_PROFILE=mock \
   python -m reposage.cli ask "How is the session opened against User.login?" --route hybrid
 ```
 
-### 用真实 bge + LiteLLM
+### Real bge + LiteLLM
 
 ```bash
 REPOSAGE_PROFILE=local \
   python -m reposage.cli index --repo path/to/your/repo --force
-make hnsw-run            # 终端 1
+make hnsw-run            # terminal 1
 REPOSAGE_PROFILE=production \
   python -m reposage.cli ask "How is the session timeout configured?" --route hybrid
 ```
 
-### 退出指标全量回放
+### Full exit-criteria replay
 
 ```bash
 make lint && make typecheck
-make test                 # python unit + integration（跳过 grpc mark）
-make test-grpc            # 启动 hnsw-server 子进程跑 grpc 集成
-make bench-graph          # Phase 1 30 题，precision >= 0.90
-make bench-rag            # Phase 2 20 题，P50 < 1.5s, recall@8 >= 0.80, citations = 100%
+make test                 # python unit + integration (skips grpc mark)
+make test-grpc            # spawn hnsw-server subprocess for grpc integration
+make bench-graph          # Phase 1 30 questions, precision >= 0.90
+make bench-rag            # Phase 2 20 questions, P50 < 1.5s, recall@8 >= 0.80, citations = 100%
 make hnsw-test            # Go race detector
 ```

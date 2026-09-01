@@ -1,200 +1,200 @@
-# Phase 4 — go-hnsw v2：持久化（persistence，索引落盘后可秒级重载）+ SIFT-1M 基准（技术方案）
+# Phase 4 — go-hnsw v2: persistence + SIFT-1M bench (technical design)
 
-> 本文档与 [`docs/ROADMAP.md`](../ROADMAP.md) 第 4 阶段对应。
-> 创建日期：2026-06-12。**完成日期：2026-06-29**（commit `28bc663`）。
-> 风格与 [docs/plans/phase-1-indexer.md](phase-1-indexer.md)、[docs/plans/phase-2-retrieval.md](phase-2-retrieval.md)、[docs/plans/phase-3-graphrag.md](phase-3-graphrag.md) 一致：专有名词括号注解。
-> 历史注记：早期源码注释把"持久化 / 基准"标为 Phase 5、把"并发"标为 Phase 6。路线图在 commit `6fa8fe1` 重排后，**持久化 + SIFT-1M 基准 = Phase 4**，**加固 + 并发 = Phase 5**。本方案以路线图为准，并顺手把过期注释改正。
+> Corresponds to stage 4 of [`docs/ROADMAP.md`](../ROADMAP.md).
+> Created: 2026-06-12. **Completed: 2026-06-29** (commit `28bc663`).
+> Style matches [docs/plans/phase-1-indexer.md](phase-1-indexer.md), [docs/plans/phase-2-retrieval.md](phase-2-retrieval.md), and [docs/plans/phase-3-graphrag.md](phase-3-graphrag.md).
+> Historical note: early source comments labeled “persistence / bench” as Phase 5 and “concurrency” as Phase 6. After the roadmap reorder in commit `6fa8fe1`, **persistence + SIFT-1M bench = Phase 4**, **hardening + concurrency = Phase 5**. This design follows the roadmap and also corrects stale comments.
 
-## 0. 完成状态（2026-06-29）
+## 0. Completion status (2026-06-29)
 
-| 交付物 | 状态 | 证据 |
+| Deliverable | Status | Evidence |
 | --- | --- | --- |
-| mmap 快照 / Recover（CSR 格式） | ✅ | [`go-hnsw/persist.go`](../../go-hnsw/persist.go) |
-| Algorithm 4 启发式邻居选择 | ✅ | [`go-hnsw/insert.go`](../../go-hnsw/insert.go) |
-| 原子快照写入（tmp + fsync + rename） | ✅ | `persist_test.go` |
-| `cmd/bench` + `internal/bench` | ✅ | SIFT-1M / synthetic 双模式 |
-| `run_sweep.py` 扫描驱动 + Faiss 基线 | ✅ | [`benchmarks/sift1m/`](../../benchmarks/sift1m/) |
-| Pareto 曲线发布 | ✅ | [`docs/BENCHMARKS.md`](../BENCHMARKS.md) §1 |
-| 1M×128 快照重载 P50 < 200 ms | ✅ | **11.7–13.0 ms**（median of 5 reloads） |
+| mmap snapshot / Recover (CSR format) | ✅ | [`go-hnsw/persist.go`](../../go-hnsw/persist.go) |
+| Algorithm 4 heuristic neighbor selection | ✅ | [`go-hnsw/insert.go`](../../go-hnsw/insert.go) |
+| Atomic snapshot write (tmp + fsync + rename) | ✅ | `persist_test.go` |
+| `cmd/bench` + `internal/bench` | ✅ | SIFT-1M / synthetic dual mode |
+| `run_sweep.py` sweep driver + Faiss baseline | ✅ | [`benchmarks/sift1m/`](../../benchmarks/sift1m/) |
+| Pareto curve published | ✅ | [`docs/BENCHMARKS.md`](../BENCHMARKS.md) §1 |
+| 1M×128 snapshot reload P50 < 200 ms | ✅ | **11.7–13.0 ms** (median of 5 reloads) |
 
-**SIFT-1M 首轮实测摘要**（缩减网格 `M∈{16,32}×efC∈{200,400}`，完整 1M base，Apple M4 单线程）：
+**SIFT-1M first-round measured summary** (reduced grid `M∈{16,32}×efC∈{200,400}`, full 1M base, Apple M4 single-thread):
 
-| 指标 | go-hnsw | Faiss-HNSWFlat | 说明 |
+| Metric | go-hnsw | Faiss-HNSWFlat | Notes |
 | --- | --- | --- | --- |
-| Recall@10（最高配置） | 0.9992 | 0.9992 | 匹配 |
-| QPS @ ~0.99 recall | ~1.0–1.1k | ~2.7k | Faiss 领先 ~2.5–3×（SIMD + 调优搜索环） |
-| Build（M32/efC400） | 4105 s | 1034 s | 构建慢 ~4×；非 Phase 4 退出指标 |
-| Recover P50（1M×128） | 11.7–13.0 ms | n/a | **Phase 4 核心退出指标** |
+| Recall@10 (best config) | 0.9992 | 0.9992 | match |
+| QPS @ ~0.99 recall | ~1.0–1.1k | ~2.7k | Faiss ahead ~2.5–3× (SIMD + tuned search loop) |
+| Build (M32/efC400) | 4105 s | 1034 s | build ~4× slower; not a Phase 4 exit metric |
+| Recover P50 (1M×128) | 11.7–13.0 ms | n/a | **Phase 4 core exit metric** |
 
-完整数字、Pareto 图与如实差距分析见 [`docs/BENCHMARKS.md`](../BENCHMARKS.md) §1 Findings。
+Full numbers, Pareto plots, and an honest gap analysis are in [`docs/BENCHMARKS.md`](../BENCHMARKS.md) §1 Findings.
 
-**准出门测试**（附加）：
+**Extra ship tests**:
 
-* `make hnsw-test`（`go test -race`）全绿
+* `make hnsw-test` (`go test -race`) all green
 * `make test` 243 passed
-* `make test-ollama` 真·本机 LM 冒烟测试跑绿
+* `make test-ollama` real on-machine LM smoke test green
 
-**遗留 / 后续**：
+**Leftovers / follow-ups**:
 
-* 全网格 `M∈{8,16,32}×efC∈{100,200,400}` 留待后续跑批（每轮 go-hnsw 1M 建图 ~22–68 min）
-* gRPC `Snapshot` RPC、并发读路径 → Phase 5
-* QPS 差距收口（SIMD / 无锁读）→ Phase 5 性能 pass
+* Full grid `M∈{8,16,32}×efC∈{100,200,400}` left for a later batch (each go-hnsw 1M build ~22–68 min)
+* gRPC `Snapshot` RPC, concurrent read path → Phase 5
+* Close the QPS gap (SIMD / lock-free reads) → Phase 5 performance pass
 
-## 1. 目标对齐
+## 1. Goal alignment
 
-路线图 Phase 4 退出指标与交付物：
+Roadmap Phase 4 exit criteria and deliverables:
 
-- **mmap（memory-mapped file，把文件直接映射进进程地址空间、由内核按页惰性载入）快照/恢复**，采用 [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) §5 承诺的 **CSR（Compressed Sparse Row，压缩稀疏行——用「行偏移数组 + 扁平数据数组」表示变长邻接表）** 邻接格式。
-- **启发式邻居选择（Algorithm 4 / SELECT-NEIGHBORS-HEURISTIC，Malkov & Yashunin 2018）** 替换 Phase 2 的朴素「取最近 M 个」（Algorithm 3），并确认层级乘子（level multiplier，`mL = 1/ln(M)`）采样正确。
-- **原子快照写入**（atomic write：先写 `*.tmp` 再 `rename` 覆盖，崩溃也不会留下半截文件）。
-- `cmd/bench` 的 SIFT-1M 基准：构建耗时 / recall@10（召回率，返回的前 10 个里有几个属于真正的前 10）/ QPS（queries per second，单线程每秒查询数）/ P50 / P99 / RSS（Resident Set Size，进程常驻物理内存）。
-- [`benchmarks/sift1m/run_sweep.py`](../../benchmarks/sift1m/run_sweep.py) 扫描驱动（sweep driver：跑遍参数网格）。
-- Recall-vs-QPS 的 **Pareto 前沿图**（Pareto frontier：在「召回更高」与「更快」之间不被任何其它配置同时碾压的点集）提交到 [`docs/BENCHMARKS.md`](../BENCHMARKS.md)。
-- 同一硬件上的 **Faiss 基线**（Facebook AI Similarity Search，业界 ANN 标准库）。
+- **mmap snapshot/recover** using the **CSR** adjacency format promised in [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) §5.
+- **Heuristic neighbor selection (Algorithm 4 / SELECT-NEIGHBORS-HEURISTIC, Malkov & Yashunin 2018)** replacing Phase 2’s naive “take the nearest M” (Algorithm 3), and confirm the level multiplier (`mL = 1/ln(M)`) sampling is correct.
+- **Atomic snapshot write** (write `*.tmp` then `rename` over the target; a crash never leaves a truncated file).
+- `cmd/bench` SIFT-1M bench: build time / recall@10 / QPS (single-thread) / P50 / P99 / RSS.
+- [`benchmarks/sift1m/run_sweep.py`](../../benchmarks/sift1m/run_sweep.py) sweep driver (full parameter grid).
+- Recall-vs-QPS **Pareto frontier** committed to [`docs/BENCHMARKS.md`](../BENCHMARKS.md).
+- **Faiss baseline** on the same hardware.
 
-**硬性退出指标**：
+**Hard exit criteria**:
 
-1. Pareto 曲线已发布（go-hnsw 与 Faiss-HNSWFlat 两条线 + 如实差距说明）。
-2. **1M × 128-d 从快照重载 P50 < 200 ms**。
+1. Pareto curve published (go-hnsw and Faiss-HNSWFlat lines + honest gap notes).
+2. **1M × 128-d reload from snapshot P50 < 200 ms**.
 
-## 2. 行业标准对齐
+## 2. Industry-standard alignment
 
-| 选择 | 引用 / 默认 |
+| Choice | Citation / default |
 | --- | --- |
-| 邻居选择 | **Algorithm 4 启发式**（RNG-style pruning，relative neighborhood graph 风格剪枝：一个候选只有"离 query 比离任何已选邻居都近"才入选，产生多样化的长短边） |
-| 启发式参数 | `extendCandidates=false`、`keepPrunedConnections=true`（与 `hnswlib` 默认一致，保证邻居数填满 M） |
-| 层级采样 | `level = floor(-ln(U(0,1]) · mL)`，`mL = 1/ln(M)`（论文 §4.1） |
-| 持久化布局 | mmap 友好：向量连续 arena（vectors arena）+ CSR 邻接，向量段放文件尾且 64B 对齐 |
-| 原子性 | `O_CREATE` 写 `*.hnsw.tmp` → `fsync` → `rename`（POSIX rename 同目录原子覆盖） |
-| 基准数据集 | **SIFT-1M**（TEXMEX corpus：1M base × 128-d、10k query、每 query 100 个 ground-truth 近邻，**L2 度量**） |
-| 数据格式 | `.fvecs`（每条 `int32 dim` + `dim × float32`）/ `.ivecs`（ground-truth，`int32 dim` + `dim × int32`） |
-| 召回口径 | recall@10 = `|返回top10 ∩ 真值top10| / 10`，对全部 query 取平均（ANN-Benchmarks 口径） |
-| 对照基线 | **Faiss `IndexHNSWFlat`**（同 M / efConstruction / efSearch、同硬件、单线程） |
-| 报告纪律 | 「若 go-hnsw 比 Faiss 慢 N×，就如实写 N」（[`benchmarks/sift1m/README.md`](../../benchmarks/sift1m/README.md) 既有约定，DD-001 also） |
-| 时延口径 | 单线程逐条 query，记录每条 wall-clock，报 P50 / P99（不混入预热那一条） |
+| Neighbor selection | **Algorithm 4 heuristic** (RNG-style pruning: a candidate is kept only if it is closer to the query than to any already-selected neighbor, yielding diverse long and short edges) |
+| Heuristic params | `extendCandidates=false`, `keepPrunedConnections=true` (hnswlib defaults; keeps neighbor count filled to M) |
+| Level sampling | `level = floor(-ln(U(0,1]) · mL)`, `mL = 1/ln(M)` (paper §4.1) |
+| Persistence layout | mmap-friendly: contiguous vectors arena + CSR adjacency; vector segment at end of file, 64B-aligned |
+| Atomicity | `O_CREATE` write `*.hnsw.tmp` → `fsync` → `rename` (POSIX rename is atomic within a directory) |
+| Bench dataset | **SIFT-1M** (TEXMEX corpus: 1M base × 128-d, 10k query, 100 ground-truth neighbors per query, **L2**) |
+| Data format | `.fvecs` (`int32 dim` + `dim × float32`) / `.ivecs` (ground-truth, `int32 dim` + `dim × int32`) |
+| Recall definition | recall@10 = `|returned top10 ∩ true top10| / 10`, averaged over all queries (ANN-Benchmarks) |
+| Baseline | **Faiss `IndexHNSWFlat`** (same M / efConstruction / efSearch, same hardware, single-thread) |
+| Reporting rule | “If go-hnsw is N× slower than Faiss, write N” (existing [`benchmarks/sift1m/README.md`](../../benchmarks/sift1m/README.md) convention, also DD-001) |
+| Latency definition | single-thread, one query at a time, record each wall-clock, report P50 / P99 (exclude the warmup query) |
 
-## 3. 前后向兼容设计
+## 3. Forward- and backward-compatible design
 
-- **算法核心 API 不破坏**：`hnsw.New / Index.Add / Index.Search / Index.Len` 签名不变。新增 `Index.Snapshot(path)`、`hnsw.Recover(path)`、`Index.Close()` 三个方法（`persist.go` 里原本就是返回 `not implemented` 的桩件，本 Phase 落实）。
-- **Config 向后兼容**：新增字段 `Metric`（度量枚举）与 `Heuristic bool`。两者的零值（`MetricCosine` / `false`）+ `DefaultConfig` 的显式赋值保证旧调用方行为不变；旧代码若直接塞 `cfg.Distance` 仍可用（`New` 优先用显式 `Distance`，否则按 `Metric` 解析）。
-- **gRPC 契约不动**：因本机缺 `protoc-gen-go` 插件，**本 Phase 不改 [`proto/hnsw.proto`](../../proto/hnsw.proto)**、不重生成 stub。快照/恢复挂在 **server 进程生命周期**（启动时若有快照则 `Recover`，否则维持 Phase 2 的「从 SQLite 冷载」；`--snapshot-on-exit` 退出时落盘）。`Snapshot` 作为 gRPC RPC 列为**可选延后项**（见 §9），等 Phase 5 顺手补插件时再加，届时 Python 侧 `hnsw_client.py` 零改动。
-- **磁盘格式带版本号**：header 里 `version=2`、`magic="HNSW"`。`Recover` 校验 magic + version，遇到未知版本**显式报错**而非误读，给 Phase 5/7 演进留空间。
-- **`.gitignore` 已覆盖**：`*.hnsw` / `*.mmap` / `data/` / `benchmarks/**/*.csv` 都已忽略，快照与基准产物不会误提交。
-- **Python 配置新增可选项**：[`reposage/config.py`](../../reposage/config.py) 复用既有 `hnsw_data_dir`，新增 `hnsw_snapshot_path`（默认 `<hnsw_data_dir>/index.hnsw`）。未配置时行为同 Phase 2（冷载 SQLite），不影响现有 `test-grpc` 集成测试。
-- **度量自洽**：SIFT 是 L2，RepoSage 嵌入是 cosine。`Metric` 写进快照头，`Recover` 据此还原 `DistanceFunc`，避免「用错距离重载」的隐患。
+- **Core algorithm API stays**: `hnsw.New / Index.Add / Index.Search / Index.Len` signatures unchanged. Add `Index.Snapshot(path)`, `hnsw.Recover(path)`, `Index.Close()` (`persist.go` already returned `not implemented`; this phase fills them in).
+- **Config backward compatible**: new fields `Metric` and `Heuristic bool`. Zero values (`MetricCosine` / `false`) plus explicit `DefaultConfig` keep old callers unchanged; old code that sets `cfg.Distance` still works (`New` prefers an explicit `Distance`, otherwise parses `Metric`).
+- **gRPC contract unchanged**: this machine lacks `protoc-gen-go`, so **this phase does not change [`proto/hnsw.proto`](../../proto/hnsw.proto)** and does not regenerate stubs. Snapshot/recover hangs off the **server process lifecycle** (Recover if a snapshot exists at start, else keep Phase 2 SQLite cold-load; `--snapshot-on-exit` writes on shutdown). `Snapshot` as a gRPC RPC is an **optional deferral** (see §9) until Phase 5 adds the plugin; Python `hnsw_client.py` then needs zero changes.
+- **On-disk format is versioned**: header `version=2`, `magic="HNSW"`. `Recover` checks magic + version and **errors explicitly** on unknown versions, leaving room for Phase 5/7 evolution.
+- **`.gitignore` already covers**: `*.hnsw` / `*.mmap` / `data/` / `benchmarks/**/*.csv`; snapshots and bench artifacts will not be committed by accident.
+- **Optional Python config**: [`reposage/config.py`](../../reposage/config.py) reuses `hnsw_data_dir`, adds `hnsw_snapshot_path` (default `<hnsw_data_dir>/index.hnsw`). Unset behaves like Phase 2 (cold-load SQLite); existing `test-grpc` is unaffected.
+- **Metric consistency**: SIFT is L2; RepoSage embeddings are cosine. `Metric` is stored in the snapshot header; `Recover` restores `DistanceFunc` from it so a reload cannot use the wrong distance.
 
-## 4. 磁盘格式（go-hnsw v2 快照）
+## 4. On-disk format (go-hnsw v2 snapshot)
 
-所有整数小端（little-endian，x86-64 / arm64 原生序，CI 与开发机均如此；大端平台在 `Recover` 处直接 panic 并注明不支持）。
+All integers little-endian (native on x86-64 / arm64; CI and dev machines are that; big-endian platforms panic in `Recover` with an unsupported note).
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│ header（固定 64 字节）                                                 │
+│ header (fixed 64 bytes)                                                │
 │   magic[4]="HNSW" | version u16=2 | metric u8 | _pad u8                │
 │   dim u32 | M u32 | maxM u32 | efConstruction u32 | efSearch u32       │
 │   maxLevel u32 | entry u32 | _pad u32 | n u64 | levelMult f64 | seed i64│
 ├──────────────────────────────────────────────────────────────────────┤
-│ idOff   : (n+1) × u64   每个节点 id 字符串在 idData 中的字节偏移        │
-│ idData  : 打包的 id 字节（idOff[n] 字节）                              │
-│ levels  : n × u16       每个节点的最高层 L_i（共 L_i+1 层）            │
-│ off0    : (n+1) × u64   第 0 层 CSR 行偏移（单位：u32 个数）           │
-│ adj0    : off0[n] × u32  第 0 层邻居（连续，搜索热路径的缓存局部性来源） │
-│ offU    : (n+1) × u64   第 1+ 层打包 blob 的 CSR 行偏移                 │
-│ adjU    : offU[n] × u32  第 1+ 层邻居 blob：每节点为 [count u32, ids…]   │
-│           按 lc=1..L_i 顺序拼接                                        │
+│ idOff   : (n+1) × u64   byte offset of each node id string in idData   │
+│ idData  : packed id bytes (idOff[n] bytes)                             │
+│ levels  : n × u16       each node's max layer L_i (L_i+1 layers total) │
+│ off0    : (n+1) × u64   layer-0 CSR row offsets (units: u32 count)     │
+│ adj0    : off0[n] × u32  layer-0 neighbors (contiguous; search hot path cache locality) │
+│ offU    : (n+1) × u64   CSR row offsets into the packed layer-1+ blob  │
+│ adjU    : offU[n] × u32  layer-1+ neighbor blob: per node [count u32, ids…] │
+│           concatenated in lc=1..L_i order                              │
 ├──────────────────────────────────────────────────────────────────────┤
-│ PAD     : 对齐到 64 字节边界                                           │
-│ vectors : n·dim × f32   连续向量 arena —— mmap 的惰性载入对象（大头）   │
+│ PAD     : align to 64-byte boundary                                    │
+│ vectors : n·dim × f32   contiguous vector arena — mmap lazy-load target (the bulk) │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**为什么这样切**：
+**Why this split**:
 
-- **向量放文件尾 + 64B 对齐**：`Recover` 把整文件 `mmap`，向量段以 `unsafe` 别名（alias，不拷贝）成 `[]float32`，内核按页惰性载入。1M×128 = 512 MB 向量若靠 `read` 拷贝，单这一步就破 200 ms 预算；mmap 让 `Recover` 几乎只花在解析小数组上。
-- **第 0 层单独 CSR**：搜索绝大部分时间在第 0 层 beam search，连续 `adj0` 给顺序扫描喂满缓存行（cache line）。
-- **上层打包成一段 blob**：层 ≥ 1 的邻居极少，按节点打包进 `adjU`，避免为每层单独建偏移数组。
-- **id 列式 + 惰性**：`Recover` **不**预构造 1M 个 Go string，也**不**重建 `idIndex` map（id→内部下标）。`Search` 只为 topK 命中按 `idData[idOff[i]:idOff[i+1]]` 即时取串；`idIndex` 只在「恢复后又收到 `Add`」时惰性重建。这把 `Recover` 的逐节点开销压到接近零。
+- **Vectors at end of file + 64B align**: `Recover` mmaps the whole file and `unsafe`-aliases the vector segment to `[]float32` with no copy; the kernel faults pages in. 1M×128 = 512 MB of vectors copied via `read` would blow the 200 ms budget on that step alone; mmap makes `Recover` spend time almost only on parsing the small arrays.
+- **Layer 0 is its own CSR**: almost all search time is layer-0 beam search; contiguous `adj0` fills cache lines on sequential scans.
+- **Upper layers packed into one blob**: neighbors at layer ≥ 1 are rare; pack per node into `adjU` instead of a separate offset array per layer.
+- **Columnar ids + lazy**: `Recover` does **not** pre-build 1M Go strings and does **not** rebuild the `idIndex` map (id → internal index). `Search` materializes strings only for topK hits via `idData[idOff[i]:idOff[i+1]]`; `idIndex` is rebuilt lazily only if `Add` arrives after recover. That drives per-node recover cost near zero.
 
-**冻结（frozen）与解冻（thaw）**：
+**Frozen and thaw**:
 
-- `Recover` 得到的索引是 **frozen**：向量别名只读 mmap，邻接为「批量分配的自有切片」（owned slice，可安全改写）。
-- `Search` 只读向量 → 安全。
-- 若 frozen 索引收到 `Add`（替换语义会原地改写向量，触碰只读 mmap 会 `SIGBUS`）：先 **thaw**——把向量与 idData 拷成自有内存、`munmap`、转为可变图，再执行 `Add`。部署形态决定这是极少路径：**服务端 = Recover→Search**；**索引端 = New→批量 Add→Snapshot**，二者都不踩 thaw。
-- `Index.Close()` 负责 `munmap`（frozen 且未 thaw 时）。
+- An index from `Recover` is **frozen**: vector alias is read-only mmap; adjacency is a batch-allocated owned slice (safe to rewrite).
+- `Search` only reads vectors → safe.
+- If a frozen index receives `Add` (replace semantics would mutate vectors in place and hit read-only mmap with `SIGBUS`): **thaw** first — copy vectors and idData into owned memory, `munmap`, become a mutable graph, then `Add`. Deployments almost never hit this: **server = Recover→Search**; **indexer = New→bulk Add→Snapshot**.
+- `Index.Close()` `munmap`s (when frozen and not yet thawed).
 
-## 5. 数据流（含原子性边界）
+## 5. Data flow (including atomicity)
 
 ```mermaid
 flowchart LR
-  subgraph Build["建库（索引端：New → 批量 Add）"]
-    Vecs[(embeddings / SIFT base)] --> Insert["insert<br/>Algorithm 1 + 4 启发式"]
-    Insert --> Mem["可变图<br/>per-node [][]uint32"]
+  subgraph Build["Build (indexer: New → bulk Add)"]
+    Vecs[(embeddings / SIFT base)] --> Insert["insert<br/>Algorithm 1 + 4 heuristic"]
+    Insert --> Mem["mutable graph<br/>per-node [][]uint32"]
   end
-  Mem -->|Snapshot| Tmp["写 index.hnsw.tmp<br/>header+ids+CSR+vectors"]
+  Mem -->|Snapshot| Tmp["write index.hnsw.tmp<br/>header+ids+CSR+vectors"]
   Tmp -->|fsync + rename| Snap[(index.hnsw)]
-  subgraph Serve["服务（服务端：Recover → Search）"]
-    Snap -->|mmap| Frozen["frozen 图<br/>向量别名 mmap / 邻接自有"]
+  subgraph Serve["Serve (server: Recover → Search)"]
+    Snap -->|mmap| Frozen["frozen graph<br/>vectors alias mmap / adj owned"]
     Q[query] --> Frozen
     Frozen --> Hits[top-k]
   end
-  Frozen -.->|"罕见：恢复后 Add"| Thaw["thaw：拷向量+ids → munmap → 可变图"]
+  Frozen -.->|"rare: Add after recover"| Thaw["thaw: copy vectors+ids → munmap → mutable graph"]
 ```
 
-**原子性约束**：
+**Atomicity**:
 
-- **快照写盘**：`Snapshot` 全程写临时文件 `path + ".tmp"`，写完 `f.Sync()`（落盘）再 `os.Rename(tmp, path)`（同目录原子覆盖）。任何中途崩溃，旧快照仍完好、`.tmp` 是孤儿（下次覆盖）。
-- **mmap 只读**：frozen 图的别名切片用三索引切片 `a[i:j:j]` 把 `cap` 收到 `len`，杜绝 `append` 误写只读页。
-- **恢复后再改**：thaw 在第一个 `Add` 前完成「拷贝→munmap→转可变」，此后与全内存建库等价。
-- **基准复跑**：`cmd/bench` 在「Build→Snapshot→Recover→Search」链路里测 recover P50，确保我们量的是真·重载而非缓存残留（每次 recover 前可选 `drop` 提示，见 §7）。
+- **Snapshot write**: `Snapshot` writes `path + ".tmp"` throughout, then `f.Sync()`, then `os.Rename(tmp, path)` (atomic replace in the same directory). Any mid-crash leaves the old snapshot intact and `.tmp` as an orphan (overwritten next time).
+- **mmap read-only**: frozen alias slices use a three-index slice `a[i:j:j]` so `cap` equals `len`, blocking `append` from writing a read-only page.
+- **Mutate after recover**: thaw finishes “copy→munmap→mutable” before the first `Add`; after that it is equivalent to a fully in-memory build.
+- **Bench replay**: `cmd/bench` measures recover P50 on the Build→Snapshot→Recover→Search path so we time a real reload, not a warm cache (optional `drop` hint before each recover; see §7).
 
-## 6. 关键文件改动
+## 6. Key file changes
 
-### 6.1 算法核心（`go-hnsw/`，纯 Go，无外部依赖）
+### 6.1 Algorithm core (`go-hnsw/`, pure Go, no extra deps)
 
-- **`distance.go`**：新增 `type Metric uint8`（`MetricCosine=0 / MetricL2=1 / MetricInnerProduct=2`）与 `func (Metric) Func() DistanceFunc`。把已有 `Cosine / L2 / InnerProductNormalised` 接到枚举。
-- **`hnsw.go`**：`Config` 加 `Metric Metric` 与 `Heuristic bool`；`DefaultConfig` 置 `Heuristic=true`、`Metric=MetricCosine`。`New` 解析：`Distance==nil` 时用 `cfg.Metric.Func()`。新增 `Index.Close()`；`Add` 在 frozen 时先 `thaw`。
-- **`graph.go`**：`node` 去掉 `id string`，仅留 `vector []float32 / neighbors [][]uint32`。`graph` 加 `idData []byte`、`idOff []uint64`、`frozen bool`、`mmap []byte`（恢复时持有句柄）。新增 `nodeID(i)`（惰性取串）、`thaw()`。`idIndex` 在 frozen 时为 `nil`，`Add` 触发惰性重建。
-- **`insert.go`**：把 `selectNeighborsSimple` 换成 `selectNeighborsHeuristic`（Algorithm 4），`connect` 与 `trimNeighbours` 都改走启发式；id 写入改为 append `idData/idOff`。保留 `selectNeighborsSimple` 供 `Heuristic=false` 回退与对照测试。
-- **`search.go`**：结果取 id 改 `g.nodeID(it.ID)`。
-- **`persist.go`**：落实 `Snapshot` / `Recover`（§4 格式 + §5 原子性）。
-- **`bytesconv.go`**（新建）：`unsafe` 的 `[]byte↔[]float32/[]uint32` 别名 + 小端断言。
-- **`mmap_unix.go`**（`//go:build unix`，新建）：`golang.org/x/sys/unix` 的 `Mmap/Munmap`。
-- **`mmap_other.go`**（`//go:build !unix`，新建）：回退为 `os.ReadFile`（无 mmap 平台仍可用，只是不省拷贝）。
+- **`distance.go`**: add `type Metric uint8` (`MetricCosine=0 / MetricL2=1 / MetricInnerProduct=2`) and `func (Metric) Func() DistanceFunc`. Wire existing `Cosine / L2 / InnerProductNormalised` to the enum.
+- **`hnsw.go`**: `Config` gains `Metric Metric` and `Heuristic bool`; `DefaultConfig` sets `Heuristic=true`, `Metric=MetricCosine`. `New` uses `cfg.Metric.Func()` when `Distance==nil`. Add `Index.Close()`; `Add` thaws if frozen.
+- **`graph.go`**: `node` drops `id string`, keeps `vector []float32 / neighbors [][]uint32`. `graph` gains `idData []byte`, `idOff []uint64`, `frozen bool`, `mmap []byte` (handle held after recover). Add `nodeID(i)` (lazy string) and `thaw()`. `idIndex` is `nil` while frozen; `Add` rebuilds it lazily.
+- **`insert.go`**: replace `selectNeighborsSimple` with `selectNeighborsHeuristic` (Algorithm 4); `connect` and `trimNeighbours` both use the heuristic; ids append into `idData/idOff`. Keep `selectNeighborsSimple` for `Heuristic=false` fallback and contrast tests.
+- **`search.go`**: fetch ids via `g.nodeID(it.ID)`.
+- **`persist.go`**: implement `Snapshot` / `Recover` (§4 format + §5 atomicity).
+- **`bytesconv.go`** (new): `unsafe` `[]byte↔[]float32/[]uint32` alias + little-endian assert.
+- **`mmap_unix.go`** (`//go:build unix`, new): `golang.org/x/sys/unix` `Mmap/Munmap`.
+- **`mmap_other.go`** (`//go:build !unix`, new): fall back to `os.ReadFile` (works without mmap, just no copy savings).
 
-### 6.2 基准（`go-hnsw/internal/bench/` 新建包 + `cmd/bench` 重写）
+### 6.2 Bench (`go-hnsw/internal/bench/` new package + rewrite `cmd/bench`)
 
-放进 `internal/bench` 以便单测（`cmd` 的 `package main` 难直接测）：
+Put logic in `internal/bench` so unit tests can hit it (`package main` under `cmd` is awkward to test):
 
-- **`vecs.go`**：`ReadFvecs / ReadIvecs`（流式读 TEXMEX 格式，校验 dim 一致）。
-- **`dataset.go`**：`LoadSIFT(dir, maxBase, maxQueries)`（读 base/query/groundtruth）+ `Synthetic(n, q, dim, seed)`（高斯随机 + 暴力算 ground-truth，给 CI 冒烟用，无需下载 1 GB）。
-- **`recall.go`**：`RecallAtK(got, truth, k)`。
-- **`run.go`**：`RunConfig(ds, cfg, topK, efSearch, snapshotPath) Result`，串起 Build→（可选 Snapshot→Recover）→Query，填 `Result{M, efC, ef, BuildS, QPS, Recall, P50ms, P99ms, RSSmb, RecoverP50ms, N, Dim}`；`Result.CSV()` / `CSVHeader()`。
-- **`internal/bench/*_test.go`**：fvecs 往返、recall 边界、synthetic 上 recall>0.9 冒烟。
-- **`cmd/bench/main.go`**：真实 CLI。`--dataset-dir`（空则 `--synthetic N` 走合成）、`--M/--efC/--ef`（后者可多值）、`--metric`、`--topk`、`--snapshot`、`--out`（CSV 追加；空则 stdout）、`--header`、`--max-base/--max-queries`。SIFT 默认 `--metric=l2`。
+- **`vecs.go`**: `ReadFvecs / ReadIvecs` (streaming TEXMEX, check dim consistency).
+- **`dataset.go`**: `LoadSIFT(dir, maxBase, maxQueries)` (base/query/groundtruth) + `Synthetic(n, q, dim, seed)` (Gaussian random + brute-force ground-truth, CI smoke, no 1 GB download).
+- **`recall.go`**: `RecallAtK(got, truth, k)`.
+- **`run.go`**: `RunConfig(ds, cfg, topK, efSearch, snapshotPath) Result` chains Build→(optional Snapshot→Recover)→Query, fills `Result{M, efC, ef, BuildS, QPS, Recall, P50ms, P99ms, RSSmb, RecoverP50ms, N, Dim}`; `Result.CSV()` / `CSVHeader()`.
+- **`internal/bench/*_test.go`**: fvecs roundtrip, recall edges, synthetic recall>0.9 smoke.
+- **`cmd/bench/main.go`**: real CLI. `--dataset-dir` (empty → `--synthetic N`), `--M/--efC/--ef` (ef can be multi-valued), `--metric`, `--topk`, `--snapshot`, `--out` (append CSV; empty → stdout), `--header`, `--max-base/--max-queries`. SIFT default `--metric=l2`.
 
-### 6.3 服务端生命周期（`cmd/server/main.go`）
+### 6.3 Server lifecycle (`cmd/server/main.go`)
 
-- 新增 `--snapshot`（路径，默认空）、`--snapshot-on-exit`（bool）。
-- **启动**：`--snapshot` 存在且文件在 → `hnsw.Recover` 快速重载，跳过 SQLite 冷载；否则维持 Phase 2 冷载，并在冷载后若给了 `--snapshot` 则写一份初始快照。
-- **退出**：`--snapshot-on-exit` 时，`GracefulStop` 后 `Snapshot` 落盘。
-- 日志打印 recover/冷载耗时与 size，便于核对 200 ms 指标。
+- Add `--snapshot` (path, default empty), `--snapshot-on-exit` (bool).
+- **Start**: if `--snapshot` is set and the file exists → `hnsw.Recover` fast reload, skip SQLite cold-load; else keep Phase 2 cold-load, and if `--snapshot` was given, write an initial snapshot after load.
+- **Exit**: if `--snapshot-on-exit`, `Snapshot` after `GracefulStop`.
+- Log recover/cold-load time and size so the 200 ms metric is easy to check.
 
-### 6.4 Python 驱动 / 配置
+### 6.4 Python driver / config
 
-- **`benchmarks/sift1m/run_sweep.py`** 重写：跑参数网格 → 调 `hnsw-bench`（带 `--out` 收 CSV）→ 解析 CSV → 用 matplotlib 画 recall-vs-QPS 散点 + Pareto 包络 → 存 `results/<date>-pareto.png` → 把汇总表回填 [`docs/BENCHMARKS.md`](../BENCHMARKS.md)。`--faiss` 时并跑 `faiss_baseline.py` 叠第二条线。无 matplotlib 时降级为「只出 CSV + 文本 Pareto」。
-- **`benchmarks/sift1m/faiss_baseline.py`**（新建）：`IndexHNSWFlat` 同参跑 SIFT，输出同列 CSV，便于与 go-hnsw 对齐叠图。
-- **`reposage/config.py`**：新增 `hnsw_snapshot_path: Path | None = None`（默认 `None` → 运行时回落 `hnsw_data_dir/index.hnsw`）。
-- **`pyproject.toml`**：新增可选依赖组 `[project.optional-dependencies].bench = ["faiss-cpu>=1.8", "matplotlib>=3.8"]`，不进默认安装（避免给核心服务背 faiss 包袱）。
+- **`benchmarks/sift1m/run_sweep.py` rewrite**: parameter grid → invoke `hnsw-bench` (`--out` CSV) → parse CSV → matplotlib recall-vs-QPS scatter + Pareto envelope → save `results/<date>-pareto.png` → fill the summary table back into [`docs/BENCHMARKS.md`](../BENCHMARKS.md). `--faiss` also runs `faiss_baseline.py` as a second line. Without matplotlib, degrade to “CSV + text Pareto only”.
+- **`benchmarks/sift1m/faiss_baseline.py`** (new): `IndexHNSWFlat` on SIFT with the same params, same-column CSV for overlay plots.
+- **`reposage/config.py`**: add `hnsw_snapshot_path: Path | None = None` (default `None` → runtime fallback `hnsw_data_dir/index.hnsw`).
+- **`pyproject.toml`**: optional extra `[project.optional-dependencies].bench = ["faiss-cpu>=1.8", "matplotlib>=3.8"]`, not in the default install (keep faiss off the core service).
 
-### 6.5 文档 / 构建
+### 6.5 Docs / build
 
-- **`docs/BENCHMARKS.md`**：补方法学（recover P50 口径、L2、单线程）、留 Pareto 图位、表头与 CSV 列对齐。
-- **`docs/ARCHITECTURE.md`** §5：把「Phase 5 才有快照」更新为「Phase 4 落地 mmap 快照/恢复」，补冷启动两条路径。
-- **`go-hnsw/README.md`**：Phase 表把持久化/基准归到 Phase 4；补持久化与基准命令。
-- **`docs/DESIGN_DECISIONS.md`**：新增 DD-026..029（见 §10）。
-- **`Makefile` / `go-hnsw/Makefile`**：`bench-sift` 接真实 CLI；新增 `hnsw-snapshot`（对 SQLite 建库后落一份快照）与 `bench-sift-synthetic`（CI 冒烟）。
+- **`docs/BENCHMARKS.md`**: methodology (recover P50 definition, L2, single-thread), Pareto figure slot, headers aligned with CSV columns.
+- **`docs/ARCHITECTURE.md`** §5: “snapshot only in Phase 5” → “Phase 4 lands mmap snapshot/recover”; document the two cold-start paths.
+- **`go-hnsw/README.md`**: Phase table moves persistence/bench to Phase 4; add persist and bench commands.
+- **`docs/DESIGN_DECISIONS.md`**: add DD-026..029 (see §10).
+- **`Makefile` / `go-hnsw/Makefile`**: `bench-sift` wired to the real CLI; add `hnsw-snapshot` (snapshot after SQLite build) and `bench-sift-synthetic` (CI smoke).
 
-## 7. 基准流程契约
+## 7. Bench pipeline contract
 
 ```mermaid
 sequenceDiagram
@@ -206,111 +206,111 @@ sequenceDiagram
   participant Faiss as faiss_baseline.py
   participant Docs as BENCHMARKS.md
 
-  Sweep->>Bench: 对每个 (M, efC, ef) 调一次
+  Sweep->>Bench: one invocation per (M, efC, ef)
   Bench->>DS: LoadSIFT(dir) / Synthetic(n)
   DS-->>Bench: base / query / groundtruth
-  Bench->>IX: New(cfg) + 批量 Add（计 build_s, rss）
+  Bench->>IX: New(cfg) + bulk Add (time build_s, rss)
   opt --snapshot
-    Bench->>IX: Snapshot(tmp) → Recover ×R（计 recover_p50_ms）
+    Bench->>IX: Snapshot(tmp) → Recover ×R (time recover_p50_ms)
   end
-  Bench->>IX: 逐条 Search（计 qps, p50, p99, recall@10）
-  Bench-->>Sweep: 追加 CSV 行
-  Sweep->>Faiss: --faiss 时同参跑一遍
-  Faiss-->>Sweep: 同列 CSV 行
-  Sweep->>Sweep: 画 recall-vs-QPS + Pareto 包络
-  Sweep->>Docs: 回填汇总表 + 嵌入 png 链接
+  Bench->>IX: Search per query (time qps, p50, p99, recall@10)
+  Bench-->>Sweep: append CSV row
+  Sweep->>Faiss: same params when --faiss
+  Faiss-->>Sweep: same-column CSV row
+  Sweep->>Sweep: plot recall-vs-QPS + Pareto envelope
+  Sweep->>Docs: fill summary table + embed png link
 ```
 
-**CSV 列**（`internal/bench.Result.CSV`，run_sweep 与 faiss_baseline 共用同一列序）：
+**CSV columns** (`internal/bench.Result.CSV`; run_sweep and faiss_baseline share column order):
 
 ```text
 index,M,efC,efSearch,recall@10,qps,p50_ms,p99_ms,build_s,rss_mb,recover_p50_ms,n,dim
 ```
 
-## 8. 测试矩阵
+## 8. Test matrix
 
-### Go 单测（`go test -race ./...`，CI ci-go）
+### Go unit (`go test -race ./...`, CI ci-go)
 
-- `distance_test.go`（扩展）：`Metric.Func()` 三种度量映射正确；L2/cosine 既有断言不变。
-- `insert_test.go`（新建）：
-  - 启发式选择在「一条直线上等距点」拓扑里挑出**分散**的邻居（验证 RNG 剪枝，不是简单取最近）；
-  - `keepPrunedConnections` 让邻居数填满 M；
-  - `Heuristic=false` 回退 `selectNeighborsSimple` 仍能跑。
-- `hnsw_test.go`（扩展）：`randomLevel` 分布——大样本下 level 0 占比 ≈ `1 - 1/M`，最高层 ≈ `log_M(n)` 量级；`Heuristic=true` 下 1k×32d 的 recall@5 仍 ≥ 48/50。
-- `persist_test.go`（新建）：
-  - **roundtrip**：建索引 → Snapshot → Recover → 同一批 query 结果**逐位一致**（id + 距离）；
-  - **header 校验**：错误 magic / 未知 version → 明确报错；
-  - **原子性**：snapshot 写一半（注入写错误）→ 旧文件完好、目标未被破坏；
-  - **frozen/thaw**：Recover 后 `Search` 正常；`Add` 触发 thaw 后 `Search` 反映新值；`Close` 后再用报错；
-  - **mmap 别名安全**：Recover 后对邻居切片 `append` 不污染相邻节点（三索引切片保证）。
-- `internal/bench/*_test.go`：
-  - `vecs_test.go`：写 tiny `.fvecs/.ivecs` → 读回一致；dim 不符报错；
-  - `recall_test.go`：构造已知 got/truth → recall@k 边界（全中=1、全错=0、部分）；
-  - `run_test.go`：`Synthetic(2000, 50, 16)` 跑通 RunConfig，recall@10 > 0.9、recover_p50 有值。
+- `distance_test.go` (extended): `Metric.Func()` maps all three metrics; existing L2/cosine asserts unchanged.
+- `insert_test.go` (new):
+  - heuristic selection on an “equidistant points on a line” topology picks **spread-out** neighbors (RNG prune, not nearest-only);
+  - `keepPrunedConnections` fills neighbor count to M;
+  - `Heuristic=false` still runs `selectNeighborsSimple`.
+- `hnsw_test.go` (extended): `randomLevel` distribution — in a large sample, fraction at level 0 ≈ `1 - 1/M`, max level ≈ `log_M(n)`; with `Heuristic=true`, 1k×32d recall@5 still ≥ 48/50.
+- `persist_test.go` (new):
+  - **roundtrip**: build → Snapshot → Recover → same query batch **bitwise identical** (id + distance);
+  - **header checks**: bad magic / unknown version → clear error;
+  - **atomicity**: snapshot half-written (injected write error) → old file intact, target not corrupted;
+  - **frozen/thaw**: `Search` works after Recover; after `Add` triggers thaw, `Search` reflects the new value; use-after-`Close` errors;
+  - **mmap alias safety**: `append` on a neighbor slice after Recover does not corrupt adjacent nodes (three-index slice).
+- `internal/bench/*_test.go`:
+  - `vecs_test.go`: write tiny `.fvecs/.ivecs` → read back equal; dim mismatch errors;
+  - `recall_test.go`: known got/truth → recall@k edges (all hit=1, all miss=0, partial);
+  - `run_test.go`: `Synthetic(2000, 50, 16)` through RunConfig, recall@10 > 0.9, recover_p50 set.
 
-### Python（pytest，沿用 mock 习惯）
+### Python (pytest, same mock habits)
 
-- `tests/unit/test_sift_sweep.py`：用伪造的 `hnsw-bench`（打印两行固定 CSV 的 shell stub）跑 `run_sweep`，断言：CSV 被正确解析、Pareto 选点逻辑对（被支配点不入前沿）、无 matplotlib 时走文本降级不抛错。faiss/matplotlib 用 `pytest.importorskip` 跳过真正画图。
-- 不新增对 faiss 的硬依赖；`faiss_baseline.py` 仅在 `--faiss` 显式调用。
+- `tests/unit/test_sift_sweep.py`: fake `hnsw-bench` (shell stub that prints two fixed CSV rows) through `run_sweep`; assert CSV parse, Pareto selection (dominated points off the frontier), text fallback without matplotlib does not throw. Skip real plotting via `pytest.importorskip` for faiss/matplotlib.
+- No hard faiss dependency; `faiss_baseline.py` only imported when `--faiss` is passed.
 
-### 集成 / 端到端
+### Integration / e2e
 
-- `make hnsw-build && ./bin/hnsw-bench --synthetic 5000 --M 16 --efC 200 --ef 16,64,128 --snapshot /tmp/s.hnsw --header`：CI 可跑、秒级、产出多行 CSV 且 recover_p50 < 200 ms（synthetic 规模下远低于）。
-- 真·SIFT-1M 与 Faiss 叠图：本地 / 后续 CI 大机器跑，数字落 `docs/BENCHMARKS.md`（dataset 1 GB 不进 CI）。
+- `make hnsw-build && ./bin/hnsw-bench --synthetic 5000 --M 16 --efC 200 --ef 16,64,128 --snapshot /tmp/s.hnsw --header`: CI-runnable, seconds, multi-row CSV, recover_p50 < 200 ms (far below at synthetic scale).
+- Real SIFT-1M + Faiss overlay: local / later large CI machine; numbers land in `docs/BENCHMARKS.md` (1 GB dataset stays out of CI).
 
-## 9. 非目标（Phase 4 不做）
+## 9. Non-goals (not in Phase 4)
 
-- **gRPC `Snapshot` RPC**：本机无 `protoc-gen-go`，不重生成 stub。快照能力先挂 server 生命周期；RPC 形态等 Phase 5 顺手补插件再加，Python 侧零改动。
-- **并发 / 无锁读路径**：路线图明确归 **Phase 5**（每层 RWMutex、lock-free 读）。本 Phase 仍单写单读，`Index.mu` 不动。
-- **增量重索引 / 快照增量合并**：归 Phase 7（`push` 只重解析变更文件）。本 Phase 快照是全量。
-- **SIFT-10M / 多线程构建 / SIMD 距离**：超出退出指标，留作后续性能 pass（Phase 5）。
-- **量化（PQ/SQ）/ 磁盘驻留索引（DiskANN 式）**：非本仓目标，向量全驻内存（mmap 即足够）。
-- **大端平台支持**：`Recover` 显式 panic 注明不支持（我们只跑 x86-64 / arm64）。
+- **gRPC `Snapshot` RPC**: no `protoc-gen-go` locally, no stub regen. Snapshot hangs off server lifecycle first; RPC form waits for Phase 5 to add the plugin; Python side zero changes.
+- **Concurrency / lock-free read path**: roadmap assigns this to **Phase 5** (per-layer RWMutex, lock-free reads). This phase stays single-writer single-reader; `Index.mu` untouched.
+- **Incremental reindex / incremental snapshot merge**: Phase 7 (`push` re-parses only changed files). This phase’s snapshot is full.
+- **SIFT-10M / multi-thread build / SIMD distance**: beyond the exit criteria; later performance pass (Phase 5).
+- **Quantization (PQ/SQ) / disk-resident index (DiskANN-style)**: not a goal of this repo; vectors stay fully in memory (mmap is enough).
+- **Big-endian platforms**: `Recover` panics with an unsupported note (we only run x86-64 / arm64).
 
-## 10. 设计决策（新增 DD）
+## 10. Design decisions (new DDs)
 
-- **DD-026 mmap 快照 + 列式惰性 id**：向量 arena mmap 别名（零拷贝、惰性载入）是 <200 ms 重载的关键；id 列式 + `idIndex` 惰性重建把恢复的逐节点开销压到接近零。代价：恢复得到 frozen 索引，写前需 thaw。
-- **DD-027 Algorithm 4 启发式邻居选择**：以 RNG 风格剪枝替换朴素最近 M，`keepPrunedConnections=true`。提升聚簇数据 recall，与 hnswlib 默认一致。`Heuristic=false` 保留作对照与回退。
-- **DD-028 原子快照（tmp+fsync+rename）**：崩溃安全优先于写入速度；半截写绝不污染现役快照。
-- **DD-029 快照挂生命周期而非 gRPC RPC（暂）**：受限于缺 `protoc-gen-go`，本 Phase 走 server 启停 + CLI；保留 RPC 为低成本的后续增项。
+- **DD-026 mmap snapshot + columnar lazy ids**: mmap-aliasing the vector arena (zero-copy, lazy load) is what makes <200 ms reload possible; columnar ids + lazy `idIndex` rebuild drive per-node recover cost near zero. Cost: recovered indexes are frozen and need thaw before writes.
+- **DD-027 Algorithm 4 heuristic neighbor selection**: RNG-style prune instead of naive nearest M, `keepPrunedConnections=true`. Better recall on clustered data; matches hnswlib defaults. `Heuristic=false` kept for contrast and fallback.
+- **DD-028 atomic snapshot (tmp+fsync+rename)**: crash safety over write speed; a truncated write must never taint the live snapshot.
+- **DD-029 snapshot on lifecycle, not gRPC RPC (for now)**: missing `protoc-gen-go`; this phase uses server start/stop + CLI; RPC stays a cheap follow-on.
 
-## 11. 风险与对策
+## 11. Risks and mitigations
 
-- **风险：`unsafe` 别名 + 只读 mmap 触发 `SIGBUS`**。对策：frozen 切片一律三索引切 `cap=len`；任何写前先 thaw；`persist_test` 专测 append 不越界；`Close` 统一 `munmap`。
-- **风险：1M recover 仍 > 200 ms**。对策：默认只 mmap 别名向量、批量分配邻接、id/idIndex 惰性；bench 直接量 recover P50，若超标先砍「邻接也别名」（再省一次拷贝），并在 BENCHMARKS.md 如实记录。
-- **风险：启发式拖慢构建 / 改变既有测试**。对策：启发式只在 `connect`/`trim` 的候选集上跑（候选已被 `ef` 限界，量级小）；保留 simple 路径；既有 recall 测试用 `DefaultConfig` 仍须绿。
-- **风险：SIFT-1M 1 GB 数据集 CI 跑不动**。对策：CI 只跑 `--synthetic` 冒烟；真实数据集本地 / 大机器跑，结果落文档。`run_sweep` 找不到数据集时清晰报错并提示下载命令。
-- **风险：Faiss 安装在某些平台麻烦**。对策：faiss 进可选 `bench` extra，不进核心安装；`faiss_baseline.py` 仅 `--faiss` 时导入；缺失时 sweep 仍出 go-hnsw 单线。
-- **风险：小端假设在异构 CI 上不成立**。对策：包级 `init` 断言小端，否则 panic；目标平台均小端，文档注明。
+- **Risk: `unsafe` alias + read-only mmap causes `SIGBUS`**. Mitigation: frozen slices always three-index `cap=len`; thaw before any write; `persist_test` covers append not overflowing; `Close` always `munmap`s.
+- **Risk: 1M recover still > 200 ms**. Mitigation: default mmap-alias vectors only, batch-allocate adjacency, lazy id/idIndex; bench measures recover P50 directly; if over budget, next cut is “alias adjacency too” (one fewer copy), and record it honestly in BENCHMARKS.md.
+- **Risk: heuristic slows build / breaks existing tests**. Mitigation: heuristic only on the `connect`/`trim` candidate set (already bounded by `ef`, small); keep the simple path; existing recall tests must stay green under `DefaultConfig`.
+- **Risk: SIFT-1M 1 GB dataset cannot run in CI**. Mitigation: CI only `--synthetic` smoke; real dataset local / large machine, results in docs. `run_sweep` errors clearly and prints the download command if the dataset is missing.
+- **Risk: Faiss install is painful on some platforms**. Mitigation: faiss in optional `bench` extra, not core; `faiss_baseline.py` imported only with `--faiss`; missing faiss still yields the go-hnsw-only curve.
+- **Risk: little-endian assumption fails on heterogeneous CI**. Mitigation: package `init` asserts little-endian or panics; target platforms are all LE; document it.
 
-## 12. 演示命令
+## 12. Demo commands
 
-### CI 冒烟（合成数据，无需下载）
+### CI smoke (synthetic, no download)
 
 ```bash
 make hnsw-build
 ./go-hnsw/bin/hnsw-bench --synthetic 5000 --M 16 --efC 200 --ef 16,64,128 \
   --snapshot /tmp/sift_smoke.hnsw --header
-make hnsw-test           # 含 persist / heuristic / bench 单测
+make hnsw-test           # includes persist / heuristic / bench unit tests
 ```
 
-### 真实 SIFT-1M + Faiss 叠图（本地）
+### Real SIFT-1M + Faiss overlay (local)
 
 ```bash
-# 1) 取数据集（~1 GB，落到 benchmarks/sift1m/data/）
+# 1) fetch dataset (~1 GB into benchmarks/sift1m/data/)
 bash benchmarks/sift1m/fetch_sift1m.sh
-# 2) go-hnsw 全扫 + Faiss 基线 + Pareto 图 + 回填 BENCHMARKS.md
+# 2) go-hnsw full sweep + Faiss baseline + Pareto plot + fill BENCHMARKS.md
 pip install -e ".[bench]"
 python benchmarks/sift1m/run_sweep.py --dataset-dir benchmarks/sift1m/data --faiss
-# 3) 单独验「1M 重载 P50 < 200 ms」
+# 3) isolate "1M reload P50 < 200 ms"
 ./go-hnsw/bin/hnsw-bench --dataset-dir benchmarks/sift1m/data \
   --M 16 --efC 200 --ef 64 --snapshot benchmarks/sift1m/data/index.hnsw
 ```
 
-### 退出指标回放
+### Exit-criteria replay
 
 ```bash
-make lint && make hnsw-test          # 算法 + 持久化 + 基准单测全绿
-# Pareto 曲线 + Faiss 对照已在 docs/BENCHMARKS.md
-# recover P50 < 200 ms 由 hnsw-bench 的 recover_p50_ms 列佐证
+make lint && make hnsw-test          # algorithm + persist + bench unit tests all green
+# Pareto curve + Faiss comparison already in docs/BENCHMARKS.md
+# recover P50 < 200 ms evidenced by hnsw-bench recover_p50_ms column
 ```

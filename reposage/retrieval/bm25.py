@@ -2,7 +2,7 @@
 
 Phase 2 ships ``rank-bm25`` (pure Python). Phase 6 swaps in Tantivy for
 ~10x indexing throughput; the `SparseRetriever` Protocol is the migration
-boundary and `reposage.retrieval.tokenize.tokenize` is the shared口径 both
+boundary and `reposage.retrieval.tokenize.tokenize` is the shared contract both
 backends use so recall does not drift on the swap (DD-035).
 """
 

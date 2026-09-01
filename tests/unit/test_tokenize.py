@@ -27,5 +27,5 @@ def test_empty_and_symbol_only() -> None:
 
 
 def test_bm25_reexports_shared_tokenize() -> None:
-    # The rank-bm25 backend must use the exact same口径 as Tantivy will.
+    # The rank-bm25 backend must use the exact same tokenisation contract as Tantivy will.
     assert bm25.tokenize is tokenize

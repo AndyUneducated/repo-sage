@@ -1,67 +1,67 @@
-# Phase 1 — 索引器（indexer）v1：tree-sitter + 符号图（symbol graph）
+# Phase 1 — Indexer v1: tree-sitter + symbol graph
 
-> 技术方案（technical design）。tree-sitter 是语法树解析器；符号图记录"代码里谁定义、谁调用、谁继承、谁导入谁"的关系网。
+> Technical design. tree-sitter is the syntax-tree parser; the symbol graph records who defines, calls, inherits, and imports whom.
 >
-> 本文是本仓库 Phase 1 的最终技术方案，与 [`docs/ROADMAP.md`](../ROADMAP.md) 第 1 阶段对应。
-> 创建日期：2026-05-21。
-> 同期讨论副本另存于 `~/.cursor/plans/phase_1_indexer_*.plan.md`。
+> This is the final Phase 1 technical design for this repo, corresponding to stage 1 of [`docs/ROADMAP.md`](../ROADMAP.md).
+> Created: 2026-05-21.
+> A contemporaneous discussion copy lives at `~/.cursor/plans/phase_1_indexer_*.plan.md`.
 
-## 目标对齐
+## Goal alignment
 
-路线图 Phase 1 的退出指标：
+Roadmap Phase 1 exit criteria:
 
-- `reposage index <repo>` 把 Python 仓库写入 SQLite（嵌入式关系型数据库，单文件存索引）。
-- `reposage ask --route graph "where is X called?"` 在 10 kLOC（约一万行代码）夹具（固定小样例仓库）上能返回 `file:line` 列表。
-- 30 题手工评分 ≥ 90% 精确率（precision，答对的引用占应回答引用的比例）；50 kLOC 索引 < 60 s。
+- `reposage index <repo>` writes a Python repository into SQLite.
+- `reposage ask --route graph "where is X called?"` returns a `file:line` list on a 10 kLOC fixture (a small, fixed sample repo).
+- ≥ 90% precision on a 30-question hand-scored set (share of expected citations that are returned correctly); 50 kLOC index in < 60 s.
 
-本次方案在路线图基础上做两处**前置增强**：
+This design adds two **forward-looking** enhancements on top of the roadmap:
 
-1. **模块感知的 Python FQN 解析**（FQN：全限定名，如 `pkg.module.Class.method`，能唯一定位到符号；对齐 Sourcegraph `scip-python` v1 的水位）。
-2. **Phase 2 / 3 / 7 用到的 schema（表结构定义）一次性加进去**：`chunks`、`repo_meta`、`file_meta`、`edges.weight`，避免后续侵入式迁移（改表要动大量已有代码和数据）。
+1. **Module-aware Python FQN resolution** (FQN: fully-qualified name, e.g. `pkg.module.Class.method`; aligned with the Sourcegraph `scip-python` v1 water-line).
+2. **Schema used by Phases 2 / 3 / 7 is added in one shot**: `chunks`, `repo_meta`, `file_meta`, `edges.weight`, so later work does not require invasive migrations.
 
-## 行业标准对齐要点
+## Industry-standard alignment
 
-- **tree-sitter 包替换**：`pyproject.toml`（Python 项目依赖清单）当前用的 `tree-sitter-languages` 自 2024 年起停止维护，社区现以 `tree-sitter-language-pack` 为准；同时把 `tree-sitter` 升到 `>=0.23` 配套的新 API（应用程序接口）。
-- **AST 感知分块**（AST：抽象语法树，代码的结构化表示；分块即切成供检索用的小段）：函数 / 方法 / 类 / 顶层语句为单元，超长函数按行级分子块（`max_lines=80`、`overlap=4` 表示相邻块重叠 4 行以免切断上下文），与 Cursor / Cody / Copilot Workspace 一致。
-- **SCIP 风格 FQN（简化版）**（SCIP：代码索引的行业交换格式；此处只借鉴命名方式）：保持 `pkg.module.Class.method` 字符串格式，但在 `nodes` 表加 `language` 列，TS / Go 接入时用 `<lang>:` 前缀消歧；不引入完整 SCIP protobuf（二进制序列化协议）。
-- **两遍解析**（cross-file resolution：跨文件把调用名解析到真实定义的标准做法）：第一遍收集所有 `def`（定义）FQN 建模块符号表；第二遍把 `call` / `inherit`（继承）/ `import` 边（关系）落到已知 FQN，未解析的保留为 `<unresolved:name>` 以便 Phase 3 兜底。
-- **CSR 风格的反向邻接**（CSR：压缩稀疏行存储，适合「给定终点查所有起点」；反向邻接即「谁指向我」）：SQLite 上等价做法是 `INDEX edges_dst_kind ON edges(dst, kind)`（在 `dst`+`kind` 上建索引，加速「查某符号被谁调用」）。
+- **tree-sitter package swap**: [`pyproject.toml`](../../pyproject.toml) currently uses `tree-sitter-languages`, unmaintained since 2024; the community standard is now `tree-sitter-language-pack`. Also bump `tree-sitter` to `>=0.23` and the matching new API.
+- **AST-aware chunking**: units are function / method / class / top-level statement; over-long functions split into line-level sub-chunks (`max_lines=80`, `overlap=4` so adjacent chunks share 4 lines). Matches Cursor / Cody / Copilot Workspace.
+- **SCIP-style FQN (simplified)**: keep the `pkg.module.Class.method` string form, but add a `language` column on `nodes`; TS / Go use a `<lang>:` prefix for disambiguation. Do not introduce full SCIP protobuf.
+- **Two-pass parsing** (cross-file resolution): pass 1 collects all `def` FQNs into a module symbol table; pass 2 lands `call` / `inherit` / `import` edges on known FQNs; unresolved names stay as `<unresolved:name>` for Phase 3 fallback.
+- **CSR-style reverse adjacency**: the SQLite equivalent is `INDEX edges_dst_kind ON edges(dst, kind)` (speeds “who calls this symbol”).
 
-## 数据流
+## Data flow
 
 ```mermaid
 flowchart LR
-  Walk["walk repo<br/>遍历仓库文件"] --> Parse["parse<br/>解析成语法树"]
-  Parse --> Chunk["chunk<br/>分块"]
-  Chunk --> CS[("ChunkStore<br/>块存储")]
-  Parse --> Extract["extract<br/>抽符号 / 边"]
-  Extract --> Resolver["resolver<br/>解析 FQN"]
-  Resolver --> NE[("nodes / edges<br/>节点与边表")]
+  Walk["walk repo"] --> Parse["parse"]
+  Parse --> Chunk["chunk"]
+  Chunk --> CS[("ChunkStore")]
+  Parse --> Extract["extract<br/>symbols / edges"]
+  Extract --> Resolver["resolver<br/>resolve FQN"]
+  Resolver --> NE[("nodes / edges")]
   Walk --> FM[("file_meta<br/>file_sha / mtime / parse_status")]
 ```
 
-`resolver` 之所以要**两遍（two-pass）**：第一遍要先看完整个仓库、知道有哪些定义，第二遍才能把一个调用名对到真正的定义上。
+The resolver is **two-pass** because pass 1 must see the whole repo’s definitions before pass 2 can bind a call name to a real definition.
 
 ```mermaid
 flowchart LR
-  subgraph Pass1["第一遍：收集"]
-    P1["遍历每个文件<br/>收集所有 def + import 绑定"] --> Tbl["全局 FQN 表<br/>+ 每文件局部符号表"]
+  subgraph Pass1["Pass 1: collect"]
+    P1["Walk every file<br/>collect all def + import bindings"] --> Tbl["global FQN table<br/>+ per-file local symbol table"]
   end
-  subgraph Pass2["第二遍：解析"]
-    P2["重走 call / inherit / import 边"] --> Match{"能对到已知 FQN？"}
-    Match -->|能| Resolved["写真实 dst FQN"]
-    Match -->|不能| Unres["写 &lt;unresolved:name&gt;<br/>(留给 Phase 3 兜底)"]
+  subgraph Pass2["Pass 2: resolve"]
+    P2["Re-walk call / inherit / import edges"] --> Match{"Maps to a known FQN?"}
+    Match -->|yes| Resolved["write real dst FQN"]
+    Match -->|no| Unres["write &lt;unresolved:name&gt;<br/>(Phase 3 fallback)"]
   end
   Tbl --> P2
 ```
 
-完整字段说明同时落到 [`docs/INDEX_SCHEMA.md`](../INDEX_SCHEMA.md)；这里只列结构。
+Full field docs also land in [`docs/INDEX_SCHEMA.md`](../INDEX_SCHEMA.md); this section is structure only.
 
 ```sql
--- 符号图主体
+-- Symbol-graph core
 CREATE TABLE nodes(
-  fqn TEXT PRIMARY KEY,         -- 全限定名，主键
-  kind TEXT NOT NULL,           -- module|class|function|method|variable（符号种类）
+  fqn TEXT PRIMARY KEY,         -- fully-qualified name, primary key
+  kind TEXT NOT NULL,           -- module|class|function|method|variable
   language TEXT NOT NULL,       -- python|typescript|go
   repo TEXT NOT NULL,
   path TEXT NOT NULL,
@@ -70,38 +70,38 @@ CREATE TABLE nodes(
 );
 
 CREATE TABLE edges(
-  src TEXT NOT NULL,            -- 边的起点（调用方等）
-  dst TEXT NOT NULL,            -- 边的终点；可能是 '<unresolved:foo>'（暂未解析到的名字）
-  kind TEXT NOT NULL,           -- def|call|inherit|import（定义/调用/继承/导入）
+  src TEXT NOT NULL,            -- edge source (caller, etc.)
+  dst TEXT NOT NULL,            -- edge destination; may be '<unresolved:foo>'
+  kind TEXT NOT NULL,           -- def|call|inherit|import
   src_path TEXT NOT NULL,
   src_line INT NOT NULL,
-  weight INTEGER NOT NULL DEFAULT 1,   -- Phase 3 Leiden（图社区划分算法）用
+  weight INTEGER NOT NULL DEFAULT 1,   -- used by Phase 3 Leiden
   PRIMARY KEY (src, dst, kind, src_line)
 );
-CREATE INDEX edges_dst_kind ON edges(dst, kind);   -- 按被指向符号查「谁连过来」
-CREATE INDEX edges_src_kind ON edges(src, kind);   -- 按起点查「连向谁」
+CREATE INDEX edges_dst_kind ON edges(dst, kind);   -- reverse adjacency: who points at this symbol
+CREATE INDEX edges_src_kind ON edges(src, kind);   -- forward: what this symbol points to
 
--- Chunk（代码片段；Phase 2 HNSW（向量近似检索索引）直接接，避免迁移）
+-- Chunks (code fragments; Phase 2 HNSW attaches here to avoid a later migration)
 CREATE TABLE chunks(
-  chunk_id TEXT PRIMARY KEY,    -- sha1(repo|path|start|end|text)（内容哈希，作稳定 ID）
+  chunk_id TEXT PRIMARY KEY,    -- sha1(repo|path|start|end|text) (stable ID)
   repo TEXT NOT NULL,
   path TEXT NOT NULL,
   language TEXT NOT NULL,
   start_line INT NOT NULL,
   end_line INT NOT NULL,
-  symbol TEXT,                  -- 所属符号名（若有）
+  symbol TEXT,                  -- enclosing symbol name, if any
   parent_symbol TEXT,
   text TEXT NOT NULL,
-  file_sha TEXT NOT NULL,       -- 整文件内容哈希，用于增量判断是否重索引
+  file_sha TEXT NOT NULL,       -- whole-file content hash, for incremental reindex
   created_at INTEGER NOT NULL
 );
 CREATE INDEX chunks_repo_path ON chunks(repo, path);
 CREATE INDEX chunks_symbol ON chunks(symbol);
 
--- 增量索引元数据（Phase 7 直接用，Phase 1 仅写不读）
+-- Incremental-index metadata (Phase 7 consumes; Phase 1 writes only)
 CREATE TABLE repo_meta(
   repo TEXT PRIMARY KEY,
-  head_sha TEXT,                -- 当前 Git 提交哈希
+  head_sha TEXT,                -- current Git commit hash
   default_branch TEXT,
   last_indexed_at INTEGER NOT NULL
 );
@@ -110,104 +110,104 @@ CREATE TABLE file_meta(
   repo TEXT NOT NULL,
   path TEXT NOT NULL,
   file_sha TEXT NOT NULL,
-  mtime INTEGER NOT NULL,       -- 文件修改时间戳
+  mtime INTEGER NOT NULL,       -- file mtime
   parse_status TEXT NOT NULL,   -- ok|parse_error|unsupported
   last_indexed_at INTEGER NOT NULL,
   PRIMARY KEY (repo, path)
 );
 ```
 
-## 关键文件改动
+## Key file changes
 
-- [`pyproject.toml`](../../pyproject.toml)：移除 `tree-sitter-languages`，加入 `tree-sitter-language-pack`、`tree-sitter>=0.23`；mypy（静态类型检查器）override 同步改名。
-- [`reposage/indexer/parser.py`](../../reposage/indexer/parser.py)：用 `tree_sitter_language_pack.get_language` 缓存 grammar（语法规则）；`parse(path)` 读 bytes → 选 grammar → 返回 `ParseResult`；解码失败/不支持返回 `None`，错误进 `file_meta.parse_status`。
-- [`reposage/indexer/chunker.py`](../../reposage/indexer/chunker.py)：递归找 `function_definition` / `class_definition` / 顶层语句；超长函数 `_split_long(text, max_lines, overlap)`；`chunk_id = sha1(repo|path|start|end|text).hexdigest()`（相同内容得相同 ID）。
-- 新增 `reposage/indexer/extractor.py`：执行 `.scm`（tree-sitter 查询脚本）查询，输出中间结构 `RawEdge(kind, local_name, src_node, src_path, src_line)`，与 FQN 解析解耦。
-- 新增 `reposage/indexer/python_resolver.py`：Python 专用模块感知解析器；接口设计成 `LanguageResolver`，TS / Go 后续 Phase 直接挂钩。
-- [`reposage/indexer/symbol_graph.py`](../../reposage/indexer/symbol_graph.py)：`SymbolNode` 加 `language` 字段；保留内存版供单测（单元测试）用。
-- [`reposage/storage/sqlite_graph.py`](../../reposage/storage/sqlite_graph.py)：实现 schema/upsert（有则更新、无则插入）/反向邻接查询；`PRAGMA journal_mode=WAL`（写前日志，读写可并发）、`synchronous=NORMAL`（刷盘策略，偏性能）。
-- 新增 `reposage/storage/chunk_store.py`：与 `SQLiteSymbolGraphStore` 共用一个 DB 文件。
-- [`reposage/indexer/pipeline.py`](../../reposage/indexer/pipeline.py)：`run(force)` 走 walk → file_sha 比对 → parse → chunk → extract → resolve → 入库 → 返回 `IndexManifest`（本次索引统计摘要）；解析失败不阻断、写进 `manifest.failures`。
-- [`reposage/retrieval/router.py`](../../reposage/retrieval/router.py)：加 graph fast-path（图查询快捷路径，免走 LLM）；正则识别 `Foo.bar` → `QueryRoute(name="graph", confidence=1.0, reason="symbolic")`，其它路由暂返回 `NotImplementedError`（Phase 2 接管）。
-- [`reposage/cli.py`](../../reposage/cli.py)：`index` 调起 `IndexPipeline`；`ask --route graph` 调起 `SQLiteSymbolGraphStore.callers_of`（查调用方）并 Rich（终端美化库）表格打印。
+- [`pyproject.toml`](../../pyproject.toml): drop `tree-sitter-languages`, add `tree-sitter-language-pack`, `tree-sitter>=0.23`; rename the matching mypy override.
+- [`reposage/indexer/parser.py`](../../reposage/indexer/parser.py): cache grammars via `tree_sitter_language_pack.get_language`; `parse(path)` reads bytes → picks grammar → returns `ParseResult`; decode failure / unsupported language returns `None`, recorded in `file_meta.parse_status`.
+- [`reposage/indexer/chunker.py`](../../reposage/indexer/chunker.py): recursively find `function_definition` / `class_definition` / top-level statements; over-long functions use `_split_long(text, max_lines, overlap)`; `chunk_id = sha1(repo|path|start|end|text).hexdigest()` (same content → same ID).
+- New `reposage/indexer/extractor.py`: run `.scm` tree-sitter queries, emit intermediate `RawEdge(kind, local_name, src_node, src_path, src_line)`, decoupled from FQN resolution.
+- New `reposage/indexer/python_resolver.py`: Python-specific module-aware resolver; interface is `LanguageResolver` so TS / Go can hook in later.
+- [`reposage/indexer/symbol_graph.py`](../../reposage/indexer/symbol_graph.py): add `language` on `SymbolNode`; keep the in-memory version for unit tests.
+- [`reposage/storage/sqlite_graph.py`](../../reposage/storage/sqlite_graph.py): schema / upsert / reverse-adjacency queries; `PRAGMA journal_mode=WAL`, `synchronous=NORMAL`.
+- New `reposage/storage/chunk_store.py`: shares one DB file with `SQLiteSymbolGraphStore`.
+- [`reposage/indexer/pipeline.py`](../../reposage/indexer/pipeline.py): `run(force)` walks → compares `file_sha` → parse → chunk → extract → resolve → persist → returns `IndexManifest`; parse failures do not abort, they go into `manifest.failures`.
+- [`reposage/retrieval/router.py`](../../reposage/retrieval/router.py): add graph fast-path (skip the LLM); regex `Foo.bar` → `QueryRoute(name="graph", confidence=1.0, reason="symbolic")`; other routes still raise `NotImplementedError` (Phase 2 takes over).
+- [`reposage/cli.py`](../../reposage/cli.py): `index` runs `IndexPipeline`; `ask --route graph` calls `SQLiteSymbolGraphStore.callers_of` and prints a Rich table.
 
-## 测试与基准
+## Tests and benchmarks
 
-- `tests/unit/`（单元测试，不依赖完整流水线）
-  - `test_parser.py`：Python/TS/Go 各跑一段 fixture（固定测试输入）字节串，断言 `Tree.root_node.has_error is False`。
-  - `test_chunker.py`：构造一个 200 行函数，断言切成 3 块，行号闭区间且重叠 4 行；空文件返回空列表。
-  - `test_python_resolver.py`：5 组 `(import_form, call_site, expected_fqn)` 断言。
-  - `test_sqlite_graph.py`：roundtrip（写入再读出一致性）+ `callers_of` 反向邻接命中。
-  - `test_chunk_store.py`：`chunk_id` 稳定性 + 同 `(repo, path)` 重写覆盖语义。
-- 新增 `tests/fixtures/tiny_python_repo/`：约 12 个文件、1.5 kLOC，含跨模块继承 / 调用 / 导入。
-- 新增 `tests/integration/test_index_e2e.py`（端到端集成测试）：跑 `IndexPipeline` over fixture，断言 `manifest.n_symbols / n_edges` 与黄金值（预期基准数字）一致。
-- 新增 `benchmarks/graph_queries/python_30.jsonl`：30 题 `{"question", "expected": [{"path","line"}]}`；新增 `benchmarks/graph_queries/run_eval.py` 输出 precision；CI（持续集成）中作为 `make bench-graph` 目标，Phase 1 退出指标硬门槛。
-- 大仓库性能：`make bench-graph LARGE=1` 跑 50 kLOC 检出（CI 中跳过；本地用），断言 wall time（实际经过的墙钟时间）< 60 s。
+- `tests/unit/`
+  - `test_parser.py`: one fixture byte string each for Python/TS/Go; assert `Tree.root_node.has_error is False`.
+  - `test_chunker.py`: a 200-line function splits into 3 chunks; line ranges are closed intervals with 4-line overlap; empty file returns `[]`.
+  - `test_python_resolver.py`: 5 `(import_form, call_site, expected_fqn)` cases.
+  - `test_sqlite_graph.py`: roundtrip + `callers_of` reverse-adjacency hit.
+  - `test_chunk_store.py`: `chunk_id` stability + overwrite semantics for the same `(repo, path)`.
+- New `tests/fixtures/tiny_python_repo/`: ~12 files, 1.5 kLOC, with cross-module inherit / call / import.
+- New `tests/integration/test_index_e2e.py`: run `IndexPipeline` over the fixture; assert `manifest.n_symbols / n_edges` match golden values.
+- New `benchmarks/graph_queries/python_30.jsonl`: 30 `{"question", "expected": [{"path","line"}]}` items; new `benchmarks/graph_queries/run_eval.py` reports precision; CI target `make bench-graph` is a hard Phase 1 exit gate.
+- Large-repo performance: `make bench-graph LARGE=1` on a 50 kLOC checkout (skipped in CI; local only); assert wall time < 60 s.
 
-## TS / Go 行为定义
+## TS / Go behavior
 
-> 与用户已确认。
+> Already confirmed with the user.
 
-Phase 1 遇到 `.ts` / `.tsx` / `.js` / `.jsx` / `.go` 文件时：
+When Phase 1 sees `.ts` / `.tsx` / `.js` / `.jsx` / `.go` files:
 
-1. 调 tree-sitter 解析一次，确保 grammar 不崩。
-2. 在 `file_meta` 写一行 `parse_status='unsupported'`，路径与 `mtime` / `file_sha` 一并写入。
-3. **不写 `chunks` / `nodes` / `edges`**。
-4. Phase 1.5 / Phase 7 接 TS 或 Go resolver 时，扫 `file_meta` 中所有 `parse_status='unsupported'` 行重做。
+1. Parse once with tree-sitter to confirm the grammar does not crash.
+2. Write one `file_meta` row with `parse_status='unsupported'`, including path, `mtime`, and `file_sha`.
+3. **Do not write `chunks` / `nodes` / `edges`**.
+4. When Phase 1.5 / Phase 7 attach a TS or Go resolver, rescan every `file_meta` row with `parse_status='unsupported'`.
 
-## 退出验证步骤
+## Exit verification
 
-按顺序跑：
+Run in order:
 
-1. `make lint && make typecheck`（代码风格 + 类型检查）
-2. `pytest -q tests/unit tests/integration`（安静模式跑测试）
+1. `make lint && make typecheck`
+2. `pytest -q tests/unit tests/integration`
 3. `make bench-graph` → precision ≥ 0.90
-4. `make bench-graph LARGE=1` → wall time < 60 s（本地 4 核）
-5. 手工演示：`reposage index --repo tests/fixtures/tiny_python_repo` → `reposage ask --route graph "where is User.login called?"`，输出非空。
+4. `make bench-graph LARGE=1` → wall time < 60 s (local 4 cores)
+5. Manual demo: `reposage index --repo tests/fixtures/tiny_python_repo` → `reposage ask --route graph "where is User.login called?"`, non-empty output.
 
-## 显式不做（推迟到后续 Phase）
+## Explicitly out of scope (later phases)
 
-- TypeScript / Go 抽边、嵌入（embedding，把文本变成向量）/ HNSW 写入、Leiden / 社区摘要、LLM（大语言模型）生成回答均**不做**；本 Phase 的 `ask --route graph` 直接打表，**不走 LLM**（与 [`docs/DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md) DD-002 一致）。
+- TypeScript / Go edge extraction, embeddings / HNSW writes, Leiden / community summaries, and LLM answers are **all out of scope**. Phase 1 `ask --route graph` hits tables directly and **does not call an LLM** (consistent with [`docs/DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md) DD-002).
 
-## 演示命令
+## Demo commands
 
-### 一行命令端到端验证
+### One-liner end-to-end
 
 ```bash
 reposage index --repo tests/fixtures/tiny_python_repo --force \
   && reposage ask "where is User.login called?" --route graph
 ```
 
-或者通过 `python -m`：
+Or via `python -m`:
 
 ```bash
 python -m reposage.cli index --repo tests/fixtures/tiny_python_repo --force \
   && python -m reposage.cli ask "where is User.login called?" --route graph
 ```
 
-### 退出指标全量回放
+### Full exit-criteria replay
 
 ```bash
 # 1) lint + typecheck
 make lint && make typecheck
 
-# 2) 全量 pytest（含 30 题门禁）
+# 2) full pytest (includes the 30-question gate)
 make test
 
-# 3) 显式跑一遍 30 题基准（与 pytest 中的 test_graph_bench 同口径）
-make bench-graph                  # precision >= 0.90 才退出 0
+# 3) explicit 30-question bench (same definition as pytest test_graph_bench)
+make bench-graph                  # exits 0 only if precision >= 0.90
 
-# 4) 50 kLOC 性能检查（指向任意 50 kLOC+ 的 Python checkout）
+# 4) 50 kLOC performance check (any 50 kLOC+ Python checkout)
 REPOSAGE_LARGE_REPO=.venv/lib/python3.12/site-packages/langchain_classic \
-  make bench-graph LARGE=1        # wall time < 60s 才退出 0
+  make bench-graph LARGE=1        # exits 0 only if wall time < 60s
 
-# 5) Go 侧 race detector（并发竞态检测）
+# 5) Go race detector
 make hnsw-test
 ```
 
-### 本地几个常用 ask 示例
+### Common local ask examples
 
-> 先跑一次 `reposage index --repo tests/fixtures/tiny_python_repo --force`，下面这些命令都会出表格输出。
+> Index once with `reposage index --repo tests/fixtures/tiny_python_repo --force`; each command below prints a table.
 
 ```bash
 reposage ask "where is User.login called?"        --route graph

@@ -1,30 +1,30 @@
-# Phase 7 — 增量索引（incremental reindex：只重解析变更文件）（技术方案）
+# Phase 7 — Incremental index (incremental reindex: re-parse only changed files) (technical design)
 
-> 本文档与 [`docs/ROADMAP.md`](../ROADMAP.md) 第 7 阶段对应。
-> 创建日期：2026-07-16。**状态：🚧 部分实现**（变更集/影响集/单文件删除 + 管线增量删除与变更刷新已落地；增量符号解析与 HNSW 墓碑待补，见下「本次实现进展」）。
-> 风格与 [phase-1-indexer.md](phase-1-indexer.md) … [phase-6-scale-out.md](phase-6-scale-out.md) 一致：专有名词括号注解。
-> 依赖：Phase 6（大仓库扩展）。被依赖：Phase 10（GitHub App 的 `push` 事件驱动本阶段）。
+> This document corresponds to Phase 7 of [`docs/ROADMAP.md`](../ROADMAP.md).
+> Created: 2026-07-16. **Status: 🚧 partially implemented** (changeset / affected set / per-file delete + pipeline incremental delete and change refresh have landed; incremental symbol resolution and HNSW tombstones still to do — see “Progress this slice” below).
+> Style matches [phase-1-indexer.md](phase-1-indexer.md) … [phase-6-scale-out.md](phase-6-scale-out.md): proper nouns annotated in parentheses.
+> Depends on: Phase 6 (large-repo scale-out). Depended on by: Phase 10 (GitHub App `push` events drive this phase).
 
-## 本次实现进展（LM-free 代码切片）
+## Progress this slice (LM-free code)
 
 ### 2026-07-16
-- ✅ 变更集：[`indexer/incremental.py`](../../reposage/indexer/incremental.py) 的 `ChangeSet` / `compute_changeset`（纯函数，added/modified/deleted/unchanged 全分类）。
-- ✅ 影响集：`affected_files`（L1 import 涟漪，DD-038）+ 存储层 `module_fqns_for_paths` / `paths_importing`。
-- ✅ 单文件删除：`SQLiteSymbolGraphStore.delete_file` / `delete_edges_by_src_path` / `all_files`（`ChunkStore.delete_by_path` 已具备）。
-- ✅ `get_repo_version`（head_sha/last_indexed_at）供 Phase 9 缓存失效。
+- ✅ Changeset: [`indexer/incremental.py`](../../reposage/indexer/incremental.py) `ChangeSet` / `compute_changeset` (pure functions; full classification of added/modified/deleted/unchanged).
+- ✅ Affected set: `affected_files` (L1 import ripple, DD-038) + storage `module_fqns_for_paths` / `paths_importing`.
+- ✅ Per-file delete: `SQLiteSymbolGraphStore.delete_file` / `delete_edges_by_src_path` / `all_files` (`ChunkStore.delete_by_path` already existed).
+- ✅ `get_repo_version` (head_sha/last_indexed_at) for Phase 9 cache invalidation.
 
-### 2026-07-17（管线整合 + 审计修复）
-- ✅ **增量删除接线**：`IndexPipeline._run`（非 force）快照 `all_files`，对比本轮 walk 到的路径，把磁盘上已删除的文件从 nodes/edges/chunks 全部清除（`_purge_deleted_files`，`manifest.n_deleted_files` 计数、CLI 表格展示）。对比基于「walk 到」而非「索引成功」，避免瞬时读错误误删仍在的文件。
-- ✅ **变更文件符号刷新**：`_index_file`（非 force）在重解析前 `delete_nodes_by_path` + `delete_edges_by_src_path`，修复两个真实 bug——① 边权 `weight` 每次重索引 `+1` 膨胀；② 被删/改名的符号残留。
-- ✅ **空文件 chunk 清理**：`_index_file` 无条件 `delete_by_path` 后再插入，修复「文件被清空后旧 chunk（及级联 embedding）残留」。
-- ✅ **等价性测试**：`test_incremental_matches_full_rebuild`——对「保符号编辑」（尾部加注释），增量重索引产出的符号图（nodes + edges + 权重）与全量重建**逐行相等**。
-- ⏳ 待补：增量符号解析（affected set 回读 importer 源，消除删除文件的悬挂入边）、HNSW 墓碑/增量 upsert、Tantivy 增量段、GraphRAG 条件重检测。
+### 2026-07-17 (pipeline integration + audit fixes)
+- ✅ **Incremental delete wiring**: `IndexPipeline._run` (non-force) snapshots `all_files`, diffs against paths walked this run, and purges files deleted on disk from nodes/edges/chunks (`_purge_deleted_files`; `manifest.n_deleted_files` count, shown in the CLI table). The comparison is “walked”, not “successfully indexed”, so a transient read error does not delete a file that is still there.
+- ✅ **Symbol refresh for changed files**: `_index_file` (non-force) runs `delete_nodes_by_path` + `delete_edges_by_src_path` before re-parse, fixing two real bugs — (1) edge `weight` inflation (`+1` on every reindex); (2) deleted/renamed symbols left behind.
+- ✅ **Empty-file chunk cleanup**: `_index_file` always `delete_by_path` then inserts, fixing “file emptied but old chunks (and cascaded embeddings) remain”.
+- ✅ **Equivalence test**: `test_incremental_matches_full_rebuild` — for a “symbol-preserving edit” (comment appended at the end), the symbol graph from incremental reindex (nodes + edges + weights) is **row-wise equal** to a full rebuild.
+- ⏳ Still to do: incremental symbol resolution (re-read importer sources in the affected set, drop dangling inbound edges from deleted files), HNSW tombstone/incremental upsert, Tantivy incremental segments, GraphRAG conditional re-detection.
 
-> 已知限制：删除文件的**入边**（其它未变更文件 `import` 它产生的边）暂不清理，需 affected-set 回读 importer 才能消除悬挂边——列入待补。
+> Known limitation: **inbound edges** of a deleted file (edges from other unchanged files that `import` it) are not cleaned up yet; eliminating those dangling edges needs an affected-set re-read of importers — listed as still to do.
 
-## 0. 背景与现状（当前「增量」是不完整的）
+## 0. Background and current state (today’s “incremental” is incomplete)
 
-Phase 1 就为增量埋了钩子：`chunks.file_sha`、`file_meta(file_sha, mtime, parse_status)`、`communities.content_sha`（见 [`docs/INDEX_SCHEMA.md`](../INDEX_SCHEMA.md)）。`IndexPipeline` 也**已经**做了一层朴素跳过：
+Phase 1 already left hooks for incrementals: `chunks.file_sha`, `file_meta(file_sha, mtime, parse_status)`, `communities.content_sha` (see [`docs/INDEX_SCHEMA.md`](../INDEX_SCHEMA.md)). `IndexPipeline` also **already** does a naive skip:
 
 ```python
 # indexer/pipeline.py :: _index_file
@@ -32,214 +32,214 @@ if not force:
     existing = graph_store.get_file_sha(self.repo_name, rel_path_str)
     if existing == file_sha:
         graph_store.upsert_file_meta(..., parse_status="cached")
-        return   # 跳过该文件
+        return   # skip this file
 ```
 
-但这层「跳过」在**非全量重建**时会产出**语义不完整甚至错误**的索引：
+That skip, when **not** doing a full rebuild, produces an index that is **semantically incomplete or wrong**:
 
-| 现象 | 根因（代码） | 后果 |
+| Symptom | Root cause (code) | Consequence |
 | --- | --- | --- |
-| 跨文件引用丢解析 | 被 `cached` 的文件**不进** `python_extractions`，`resolver.resolve()` 只看到变更文件 → 全仓符号表不全 | 变更文件里指向未变文件的 `import`/调用变 `<unresolved>` |
-| 陈旧边残留 | `upsert_edges` 用 `ON CONFLICT ... weight+1` 只增不减；变更文件删掉的调用，旧边仍在 | 图里有「已不存在的调用」 |
-| 删除文件不处理 | 无「磁盘上已删、索引里还在」的清理 | 幽灵节点/边/chunk 长期残留 |
-| 社区全量重算 | `_run_graphrag` 每次 `clear_repo` + 全图 `detect` | 大仓库上每次 push 都跑一遍 Leiden |
-| 稠密/稀疏无增量 | HNSW/BM25 靠服务端**冷载 SQLite**；无 delta 通道 | 改一个文件要重启/重载整库 |
+| Cross-file refs lose resolution | `cached` files **never enter** `python_extractions`; `resolver.resolve()` only sees changed files → whole-repo symbol table is incomplete | `import`/calls in changed files that point at unchanged files become `<unresolved>` |
+| Stale edges remain | `upsert_edges` uses `ON CONFLICT ... weight+1` — only grows; a call removed from a changed file leaves the old edge | Graph still has “calls that no longer exist” |
+| Deleted files not handled | No cleanup for “gone on disk, still in the index” | Ghost nodes/edges/chunks linger |
+| Communities always fully recomputed | `_run_graphrag` always `clear_repo` + whole-graph `detect` | Every push on a large repo reruns Leiden |
+| Dense/sparse not incremental | HNSW/BM25 **cold-load SQLite** on the server; no delta channel | Changing one file means restart/reload the whole store |
 
-**唯一正确路径是 `--force`（`clear_repo` + 全量）**——大仓库上就是「分钟级全量」。
+**The only correct path is `--force` (`clear_repo` + full rebuild)** — on a large repo that is “minutes of full rebuild”.
 
-**本 Phase 的命题**：把「只重解析变更文件」做到**结果与全量重建一致**，且在大仓库上从分钟级压到秒级。
+**This phase’s proposition**: make “re-parse only changed files” **match a full rebuild**, and on large repos compress minutes to seconds.
 
-## 1. 目标与范围
+## 1. Goals and scope
 
-**目标**：`reposage index`（无 `--force`）与 `push` 事件驱动的重索引，只处理新增/修改/删除文件，且**输出等价于全量重建**。
+**Goal**: `reposage index` (without `--force`) and `push`-driven reindex process only added/modified/deleted files, and **output is equivalent to a full rebuild**.
 
-**In scope**：变更检测（含删除）、符号图增量（节点/边/chunk 的增删改 + 跨文件涟漪）、HNSW 增量 upsert + 逐出、Tantivy 增量段提交、社区增量（复用 + 条件重算）、`push` changed-files 入口、**等价性保证**。
+**In scope**: change detection (including deletes), incremental symbol graph (CRUD on nodes/edges/chunks + cross-file ripple), HNSW incremental upsert + eviction, Tantivy incremental segment commit, incremental communities (reuse + conditional recompute), `push` changed-files entry point, **equivalence guarantee**.
 
-**Out of scope**：
-- 稀疏/稠密的绝对速度优化、缓存 → Phase 9。
-- Tantivy 首次引入（本 Phase 依赖它的增量能力）→ 已在 Phase 6。
-- GitHub webhook 收发本身 → Phase 10（本 Phase 只定义「吃 changed-files 列表」的接口）。
+**Out of scope**:
+- Absolute sparse/dense speed, cache → Phase 9.
+- First introduction of Tantivy (this phase depends on its incremental capability) → already Phase 6.
+- GitHub webhook send/receive itself → Phase 10 (this phase only defines the interface that **consumes a changed-files list**).
 
-## 2. 交付物（deliverables）
+## 2. Deliverables
 
-| # | 交付物 | 落点 |
+| # | Deliverable | Landing spot |
 | --- | --- | --- |
-| D1 | 变更集计算：added / modified / deleted / unchanged 四类 | `indexer/incremental.py`（新）`compute_changeset()` |
-| D2 | 节点/边/chunk 的按文件删除 API | `storage/sqlite_graph.py` `delete_file(repo, path)`；`chunk_store.delete_by_path`（已存在） |
-| D3 | 跨文件涟漪：受影响文件集（affected set）扩展 | `incremental.py` 基于 `edges(kind='import')` 反查 |
-| D4 | 增量 resolve：未变文件符号从 `nodes` 复用，仅重解析受影响文件的边 | `python_resolver.py` `resolve_incremental()` |
-| D5 | HNSW 增量：新增 chunk `Add`/`bulk_load`，删除 chunk 逐出（tombstone + 阈值重建） | `proto/hnsw.proto` +`Delete` RPC、go-hnsw、`hnsw_client.py` |
-| D6 | Tantivy 增量：`delete_term(chunk_id)` + add + commit | `retrieval/tantivy_sparse.py` |
-| D7 | 社区增量：复用 `content_sha` 摘要 + 条件重检测 | `pipeline._run_graphrag` |
-| D8 | `push` 入口：吃 changed-files 列表直接增量 | `indexer/pipeline.py` `run_incremental(changed, deleted)` |
-| D9 | 等价性测试工具：增量结果 vs 全量结果逐表 diff | `tests/…/test_incremental_equivalence.py` |
+| D1 | Changeset computation: added / modified / deleted / unchanged | `indexer/incremental.py` (new) `compute_changeset()` |
+| D2 | Per-file delete API for nodes/edges/chunks | `storage/sqlite_graph.py` `delete_file(repo, path)`; `chunk_store.delete_by_path` (already exists) |
+| D3 | Cross-file ripple: expand the affected set | `incremental.py` reverse lookup on `edges(kind='import')` |
+| D4 | Incremental resolve: reuse symbols of unchanged files from `nodes`; re-resolve only affected files’ edges | `python_resolver.py` `resolve_incremental()` |
+| D5 | Incremental HNSW: `Add`/`bulk_load` new chunks; evict deleted chunks (tombstone + threshold rebuild) | `proto/hnsw.proto` + `Delete` RPC, go-hnsw, `hnsw_client.py` |
+| D6 | Incremental Tantivy: `delete_term(chunk_id)` + add + commit | `retrieval/tantivy_sparse.py` |
+| D7 | Incremental communities: reuse `content_sha` summaries + conditional re-detection | `pipeline._run_graphrag` |
+| D8 | `push` entry: incremental directly from a changed-files list | `indexer/pipeline.py` `run_incremental(changed, deleted)` |
+| D9 | Equivalence test harness: incremental vs full rebuild, per-table diff | `tests/…/test_incremental_equivalence.py` |
 
-## 3. 准出指标（exit criteria）
+## 3. Exit criteria
 
-| 指标 | 目标 | 量法 |
+| Metric | Target | How measured |
 | --- | --- | --- |
-| **提速** | 改动占比 5% 时，增量重索引相对全量 **≥ 10×** | 大仓库夹具计时对照 |
-| **等价性** | 增量后 `nodes`/`edges`/`chunks`/`embeddings`/`communities` 与全量重建**逐行等价**（modulo 自增 id） | `test_incremental_equivalence` 全绿 |
-| **检索一致** | 增量后同一批查询 top-k 与全量重建一致 | RAG 对照 |
-| **删除干净** | 删文件后无幽灵 node/edge/chunk/embedding/tombstone 泄漏 | 删除用例断言计数归零 |
-| **HNSW 不失效** | 增量 upsert/逐出后 recall 不低于重建；tombstone 比例超阈自动重建 | go-hnsw 单测 + 集成 |
+| **Speedup** | At 5% files changed, incremental reindex is **≥ 10×** vs full | Timed comparison on the large-repo fixture |
+| **Equivalence** | After incremental, `nodes`/`edges`/`chunks`/`embeddings`/`communities` are **row-wise equivalent** to a full rebuild (modulo autoincrement ids) | `test_incremental_equivalence` all green |
+| **Retrieval consistency** | After incremental, the same query batch’s top-k matches a full rebuild | RAG comparison |
+| **Deletes are clean** | After deleting a file, no ghost node/edge/chunk/embedding/tombstone leak | Delete-case assertions that counts go to zero |
+| **HNSW stays valid** | After incremental upsert/eviction, recall is no worse than rebuild; auto-rebuild when tombstone ratio exceeds the threshold | go-hnsw unit + integration |
 
-## 4. 架构与数据流
+## 4. Architecture and data flow
 
-### 4.1 增量主流程
+### 4.1 Incremental main flow
 
 ```mermaid
 flowchart TD
-  IN["输入: 全量扫描 或 push changed-files"] --> CS["compute_changeset()<br/>对比 file_meta.file_sha"]
+  IN["input: full scan or push changed-files"] --> CS["compute_changeset()<br/>compare file_meta.file_sha"]
   CS --> A["added"] & M["modified"] & D["deleted"] & U["unchanged"]
-  A --> AFF["affected set 扩展<br/>(反查 import 依赖者)"]
+  A --> AFF["expand affected set<br/>(reverse-lookup import dependents)"]
   M --> AFF
-  D --> DEL["删除: node/edge/chunk/embedding/tantivy term"]
-  AFF --> REP["重解析受影响文件<br/>replace nodes/edges/chunks"]
-  U --> REUSE["复用: nodes/edges/chunks/embeddings 原样保留"]
-  REP --> RES["resolve_incremental()<br/>= 复用符号表 ∪ 重解析符号"]
+  D --> DEL["delete: node/edge/chunk/embedding/tantivy term"]
+  AFF --> REP["re-parse affected files<br/>replace nodes/edges/chunks"]
+  U --> REUSE["reuse: keep nodes/edges/chunks/embeddings as-is"]
+  REP --> RES["resolve_incremental()<br/>= reused symbol table ∪ re-parsed symbols"]
   DEL --> RES
-  RES --> STORES["写回 SQLite (批量事务, Phase 6)"]
-  STORES --> HN["HNSW: Add 新向量 + Delete 逐出旧 chunk_id"]
+  RES --> STORES["write back SQLite (batched tx, Phase 6)"]
+  STORES --> HN["HNSW: Add new vectors + Delete-evict old chunk_id"]
   STORES --> TAN["Tantivy: delete_term + add + commit"]
-  STORES --> COM["社区: 复用 content_sha 摘要 + 条件重检测"]
+  STORES --> COM["communities: reuse content_sha summaries + conditional re-detection"]
 ```
 
-### 4.2 为什么「改一个 chunk = 新 chunk_id」
+### 4.2 Why “changing a chunk = a new chunk_id”
 
-`chunk_id = sha1(repo|path|start_line|end_line|text)`（见 `INDEX_SCHEMA` chunks）。**内容一变，id 变**。因此增量对 chunk 是「旧 id 作废 + 新 id 新增」，天然幂等：
-- SQLite：`chunk_store.delete_by_path` 删旧，`upsert` 写新，embeddings 经 `ON DELETE CASCADE` 自动清（已实现）。
-- HNSW/Tantivy：旧 chunk_id 需**显式逐出**（它们不随 SQLite 级联）。这是本 Phase 对两个索引新增的核心能力。
+`chunk_id = sha1(repo|path|start_line|end_line|text)` (see `INDEX_SCHEMA` chunks). **Any content change changes the id.** So incrementals treat chunks as “invalidate the old id + insert the new id”, which is naturally idempotent:
+- SQLite: `chunk_store.delete_by_path` removes old, `upsert` writes new; embeddings clear automatically via `ON DELETE CASCADE` (already implemented).
+- HNSW/Tantivy: old chunk_ids need **explicit eviction** (they do not cascade with SQLite). That is the core capability this phase adds to both indexes.
 
-## 5. 关键设计与取舍
+## 5. Key design and trade-offs
 
-### 5.1 偏好流程图：一个文件该怎么处理
+### 5.1 Preference flowchart: how to handle one file
 
 ```mermaid
 flowchart TD
-  F["文件 path"] --> onDisk{"仍在磁盘?"}
-  onDisk -- 否 --> del["DELETE 全部产物<br/>(node/edge/chunk/embedding/index term)"]
-  onDisk -- 是 --> known{"file_meta 有记录?"}
-  known -- 否 --> add["ADD: 全解析 + 全写入"]
-  known -- 是 --> sha{"file_sha 变了?"}
-  sha -- 是 --> mod["MODIFY: 删旧产物 → 重解析 → 写新"]
-  sha -- 否 --> inAff{"在 affected set?<br/>(依赖的模块变了)"}
-  inAff -- 是 --> reedge["仅重解析边<br/>(节点/chunk 复用, 重算跨文件引用)"]
-  inAff -- 否 --> skip["SKIP: 标 cached, 复用一切"]
+  F["file path"] --> onDisk{"still on disk?"}
+  onDisk -- no --> del["DELETE all artefacts<br/>(node/edge/chunk/embedding/index term)"]
+  onDisk -- yes --> known{"file_meta has a row?"}
+  known -- no --> add["ADD: full parse + full write"]
+  known -- yes --> sha{"file_sha changed?"}
+  sha -- yes --> mod["MODIFY: delete old artefacts → re-parse → write new"]
+  sha -- no --> inAff{"in affected set?<br/>(a depended-on module changed)"}
+  inAff -- yes --> reedge["re-resolve edges only<br/>(reuse nodes/chunks; recompute cross-file refs)"]
+  inAff -- no --> skip["SKIP: mark cached, reuse everything"]
 ```
 
-### 5.2 取舍：跨文件涟漪（affected set）做到多深
+### 5.2 Trade-off: how deep the cross-file ripple (affected set) goes
 
-改 `b.py` 里 `B.foo` 的位置/签名，会影响 `a.py` 里 `a → B.foo` 那条边的解析。做多深是准确率与速度的权衡：
+Changing the location/signature of `B.foo` in `b.py` affects resolution of the `a → B.foo` edge in `a.py`. Depth is an accuracy vs speed trade-off:
 
-| 层级 | 重解析范围 | 准确性 | 成本 | 结论 |
+| Level | Re-parse scope | Accuracy | Cost | Verdict |
 | --- | --- | --- | --- | --- |
-| L0 仅变更文件 | 变更文件本身 | 变更文件指向他人的边正确；**他人指向变更文件**的边可能陈旧 | 最低 | ❌ 不达等价 |
-| **L1 变更文件 + 直接 import 依赖者（1 跳）** | 反查 `edges(kind='import', dst=变更模块)` 的 src 文件 | 覆盖绝大多数常见涟漪（重命名/移动/删符号） | 低（import 边稀疏） | ✅ **采用（默认）** |
-| L2 传递闭包 | 递归依赖者 | 理论最全 | 大仓上可能退化为近全量 | ⬜ 仅 `--deep` 显式开启 |
-| Lfull 全量 | 全仓 | 100% | 慢 | 回退保底（`--force`） |
+| L0 changed files only | The changed files themselves | Outbound edges from changed files are correct; **inbound edges from others to changed files** may be stale | lowest | ❌ not equivalent |
+| **L1 changed files + direct import dependents (1 hop)** | Reverse-lookup `edges(kind='import', dst=changed module)` src files | Covers the vast majority of common ripples (rename/move/delete symbol) | low (import edges are sparse) | ✅ **adopt (default)** |
+| L2 transitive closure | Recursive dependents | Theoretically complete | on a large repo may collapse to near-full | ⬜ only with explicit `--deep` |
+| Lfull full | Whole repo | 100% | slow | fallback safety net (`--force`) |
 
-**采用 L1**：`import` 边在 SQLite 里可 O(matches) 反查（`edges_dst_kind` 覆盖索引）。L1 未覆盖的极端涟漪（间接传递重命名）由「等价性 CI 对照 + 周期性 `--force` 校准」兜底，并在文档写明这条边界。
+**Adopt L1**: `import` edges in SQLite reverse-lookup in O(matches) (`edges_dst_kind` covering index). Extreme ripples L1 misses (indirect transitive rename) are covered by “equivalence CI comparison + periodic `--force` calibration”, and this boundary is documented.
 
-### 5.3 取舍：增量 resolve 的符号表从哪来
+### 5.3 Trade-off: where incremental resolve gets its symbol table
 
-`PythonModuleResolver` 需要**全仓符号表**。增量时不想重解析未变文件，符号表怎么补全？
+`PythonModuleResolver` needs a **whole-repo symbol table**. Incrementally we do not want to re-parse unchanged files — how is the table completed?
 
-| 方案 | 说明 | 结论 |
+| Option | Notes | Verdict |
 | --- | --- | --- |
-| A. 重解析全仓拿符号表 | 违背增量初衷 | ❌ |
-| **B. 未变文件的符号从 `nodes` 表读回（它就是持久化的符号表）** | `nodes(fqn, kind, path, …)` 即全仓符号目录；增量 resolve = 「DB 里的未变符号 ∪ 重解析出的变更符号」 | ✅ **采用** |
-| C. 额外维护一份符号表缓存文件 | 与 `nodes` 冗余、易漂 | ❌ |
+| A. Re-parse the whole repo for the symbol table | Defeats the point of incrementals | ❌ |
+| **B. Read unchanged files’ symbols back from the `nodes` table (it is the persisted symbol table)** | `nodes(fqn, kind, path, …)` is the whole-repo symbol catalogue; incremental resolve = “unchanged symbols in the DB ∪ re-parsed changed symbols” | ✅ **adopt** |
+| C. Extra on-disk symbol-table cache | Redundant with `nodes`, easy to drift | ❌ |
 
-方案 B 让 `nodes` 表一表两用：既是查询热路径数据，又是增量解析的符号目录。`resolve_incremental(changed_symbols, db_symbols)` 只为受影响文件重新发射边。
+Option B makes `nodes` do double duty: query hot-path data and the symbol catalogue for incremental resolution. `resolve_incremental(changed_symbols, db_symbols)` re-emits edges only for affected files.
 
-### 5.4 取舍：HNSW 如何「删」
+### 5.4 Trade-off: how HNSW “deletes”
 
-go-hnsw 现在**只增不删**（`Add` 有替换语义，但无删除）。删除的 chunk_id 必须从图里逐出：
+go-hnsw today **only adds, never deletes** (`Add` has replace semantics, but no delete). Deleted chunk_ids must be evicted from the graph:
 
 ```mermaid
 flowchart TD
-  ev["逐出 chunk_id"] --> mark["标 tombstone<br/>(内部 id → deleted 位图)"]
-  mark --> search["Search: 跳过 tombstone 命中<br/>(over-fetch 补齐 top-k)"]
-  search --> ratio{"tombstone 占比 > 阈值?<br/>(默认 20%)"}
-  ratio -- 否 --> keep["保持, 零重建成本"]
-  ratio -- 是 --> rebuild["后台重建 (compaction)<br/>New → 批量 Add 存活项 → 原子换图"]
+  ev["evict chunk_id"] --> mark["mark tombstone<br/>(internal id → deleted bitmap)"]
+  mark --> search["Search: skip tombstone hits<br/>(over-fetch to fill top-k)"]
+  search --> ratio{"tombstone ratio > threshold?<br/>(default 20%)"}
+  ratio -- no --> keep["keep; zero rebuild cost"]
+  ratio -- yes --> rebuild["background rebuild (compaction)<br/>New → batched Add of live items → atomic graph swap"]
 ```
 
-| 方案 | 删除时延 | 内存 | recall 影响 | 结论 |
+| Option | Delete latency | Memory | Recall impact | Verdict |
 | --- | --- | --- | --- | --- |
-| 立即从图删 + 修边 | 高（改邻接、可能断连通） | 稳 | 易劣化 | ❌ HNSW 删点是公认难点 |
-| **Tombstone + 阈值重建（compaction）** | O(1) 标记 | tombstone 累积到重建前 | 搜索期跳过、over-fetch 补齐；重建后归零 | ✅ **采用**（业界主流，含 hnswlib `mark_deleted`） |
-| 每次删都重建 | —— | 稳 | 无 | ❌ 频繁 push 下太贵 |
+| Delete from the graph immediately + repair edges | high (mutate adjacency, may break connectivity) | stable | easy to degrade | ❌ deleting HNSW vertices is a known hard problem |
+| **Tombstone + threshold rebuild (compaction)** | O(1) mark | tombstones accumulate until rebuild | skip at search time, over-fetch to fill; zero after rebuild | ✅ **adopt** (industry mainstream, including hnswlib `mark_deleted`) |
+| Rebuild on every delete | — | stable | none | ❌ too expensive under frequent push |
 
-新增 gRPC `Delete(id)`（proto 需 `protoc-gen-go`；若环境仍缺，按 DD-029 先挂**服务端方法** + Python 侧走「重建阈值到点由服务端自动 compaction」，proto 扩展留低成本后续）。
+New gRPC `Delete(id)` (proto needs `protoc-gen-go`; if the environment still lacks it, follow DD-029: park a **server method** first + Python side relies on “server auto-compaction when the rebuild threshold is hit”; proto extension is a cheap follow-up).
 
-### 5.5 取舍：社区增量
+### 5.5 Trade-off: incremental communities
 
-| 环节 | 现状 | Phase 7 |
+| Stage | Today | Phase 7 |
 | --- | --- | --- |
-| 摘要 | 已按 `content_sha` 复用（未变社区跳 LLM） | 保持 |
-| 检测（Leiden） | 每次全图重跑 | **条件重跑**：变更节点/边占比 < 阈值（默认 10%）时，只对受影响社区局部重算；否则全量 |
-| 嵌入 | 每次对有摘要社区重嵌 | 仅对新/变摘要重嵌 |
+| Summaries | Already reused by `content_sha` (unchanged communities skip the LLM) | keep |
+| Detection (Leiden) | Whole-graph rerun every time | **Conditional rerun**: if the fraction of changed nodes/edges is below a threshold (default 10%), recompute only affected communities locally; otherwise full |
+| Embedding | Re-embed every community that has a summary | Re-embed only new/changed summaries |
 
-社区局部重算较复杂（Leiden 非增量算法），取舍为「**阈值门控**」：小改动跳过重检测、沿用旧 `content_sha` 命中；大改动才全量重检测。这样常见的「改几个文件」不触发 Leiden，符合等价性（`content_sha` 不变即社区成员集不变）。
+Local community recompute is relatively complex (Leiden is not an incremental algorithm). The trade-off is **threshold gating**: small changes skip re-detection and keep hitting old `content_sha`; large changes do a full re-detection. Typical “a few files changed” does not trigger Leiden, which matches equivalence (`content_sha` unchanged means the community membership set is unchanged).
 
-## 6. 关键文件改动
+## 6. Key file changes
 
-- **`indexer/incremental.py`**（新）：`compute_changeset(repo, disk_files, file_meta)` → `ChangeSet(added, modified, deleted, unchanged)`；`affected_files(changeset, graph_store)`（L1 import 反查）。
-- **`indexer/pipeline.py`**：`run(force)` 分流——`force` 走现状全量；否则走 `_run_incremental(changeset)`；新增 `run_incremental(changed, deleted)` 供 `push` 直喂。删除路径调用各 store 的 `delete_file`。
-- **`indexer/python_resolver.py`**：`resolve_incremental(changed_symbol_tables, db_symbols)` 只发射受影响边。
-- **`storage/sqlite_graph.py`**：`delete_file(repo, path)`（删该文件的 nodes + 以 `src_path` 删 edges + file_meta 行）；`iter_symbols(repo)`（读回符号目录）；`delete_edges_by_src_path`。
-- **`storage/chunk_store.py`**：`delete_by_path`（已存在）复用；补 `iter_chunk_ids_by_path` 供索引逐出。
-- **`proto/hnsw.proto` + go-hnsw + `retrieval/hnsw_client.py`**：`Delete(ids)` / tombstone / compaction；客户端 `delete(chunk_ids)`。
-- **`retrieval/tantivy_sparse.py`**：`delete_terms(chunk_ids)` + `commit`。
-- **`pipeline._run_graphrag`**：加变更占比门控 + 仅重嵌新摘要。
+- **`indexer/incremental.py`** (new): `compute_changeset(repo, disk_files, file_meta)` → `ChangeSet(added, modified, deleted, unchanged)`; `affected_files(changeset, graph_store)` (L1 import reverse lookup).
+- **`indexer/pipeline.py`**: `run(force)` splits — `force` keeps today’s full path; otherwise `_run_incremental(changeset)`; new `run_incremental(changed, deleted)` for `push` to feed directly. Delete paths call each store’s `delete_file`.
+- **`indexer/python_resolver.py`**: `resolve_incremental(changed_symbol_tables, db_symbols)` emits only affected edges.
+- **`storage/sqlite_graph.py`**: `delete_file(repo, path)` (delete that file’s nodes + edges by `src_path` + file_meta row); `iter_symbols(repo)` (read back the symbol catalogue); `delete_edges_by_src_path`.
+- **`storage/chunk_store.py`**: reuse existing `delete_by_path`; add `iter_chunk_ids_by_path` for index eviction.
+- **`proto/hnsw.proto` + go-hnsw + `retrieval/hnsw_client.py`**: `Delete(ids)` / tombstone / compaction; client `delete(chunk_ids)`.
+- **`retrieval/tantivy_sparse.py`**: `delete_terms(chunk_ids)` + `commit`.
+- **`pipeline._run_graphrag`**: add change-fraction gating + re-embed only new summaries.
 
-## 7. 测试矩阵
+## 7. Test matrix
 
-| 层 | 用例 | 断言 |
+| Layer | Case | Assertion |
 | --- | --- | --- |
-| 单元 | `compute_changeset` | added/modified/deleted/unchanged 四类分类正确（含删除、含新增） |
-| 单元 | affected set L1 | 改被依赖模块 → 依赖者进受影响集；无关文件不进 |
-| 单元 | `delete_file` | 该文件 node/edge/chunk/embedding 计数归零，其他文件不受影响 |
-| **等价性** | 增量 vs 全量 | 对同一系列改动，`_run_incremental` 后各表与 `run(force=True)` **逐行等价** |
-| 单元 | HNSW tombstone | 删后 Search 不返回被删 id；over-fetch 补足 top-k；超阈重建后 tombstone 归零、recall 恢复 |
-| 单元 | Tantivy 增量 | `delete_term`+add+commit 后旧 chunk 不召回、新 chunk 可召回 |
-| 集成 | `push` 入口 | 给定 changed/deleted 列表，秒级完成且结果等价 |
-| 基准 | 5% 改动提速 | 增量 wall-clock ≤ 全量 / 10 |
+| Unit | `compute_changeset` | added/modified/deleted/unchanged classified correctly (includes deletes and adds) |
+| Unit | affected set L1 | Changing a depended-on module puts dependents in the affected set; unrelated files stay out |
+| Unit | `delete_file` | That file’s node/edge/chunk/embedding counts go to zero; other files are untouched |
+| **Equivalence** | Incremental vs full | For the same series of edits, tables after `_run_incremental` are **row-wise equivalent** to `run(force=True)` |
+| Unit | HNSW tombstone | After delete, Search does not return the deleted id; over-fetch fills top-k; after threshold rebuild, tombstones go to zero and recall recovers |
+| Unit | Incremental Tantivy | After `delete_term`+add+commit, old chunks are not recalled and new chunks are |
+| Integration | `push` entry | Given changed/deleted lists, finishes in seconds and results are equivalent |
+| Benchmark | 5% change speedup | Incremental wall-clock ≤ full / 10 |
 
-**等价性测试是本 Phase 的北极星**：任何增量优化都必须过「增量结果 == 全量结果」这一关。
+**Equivalence tests are this phase’s north star**: any incremental optimisation must pass “incremental result == full-rebuild result”.
 
-## 8. 设计决策（拟新增，落地时登记）
+## 8. Design decisions (proposed; register when landing)
 
-- **DD-037 增量以 `file_sha` 为准、`nodes` 表兼作持久符号目录**：未变文件符号从 DB 读回参与 resolve，避免重解析又保跨文件正确。
-- **DD-038 L1 import 涟漪（affected set = 变更文件 + 直接依赖者）**：覆盖常见重命名/移动；传递闭包与全量作为 `--deep`/`--force` 兜底；等价性 CI + 周期 `--force` 校准边界。
-- **DD-039 HNSW tombstone + 阈值 compaction**：删除 O(1) 标记、搜索期跳过、超阈后台重建；避免在线删点破坏图连通。
-- **DD-040 社区检测阈值门控**：小改动复用 `content_sha` 分区、跳过 Leiden；大改动才全量重检测。
-- **DD-041 增量正确性以「等价全量」为验收契约**：增量是优化，不是新语义；CI 逐表 diff 守门。
+- **DD-037 Incrementals keyed on `file_sha`; `nodes` doubles as the persisted symbol catalogue**: unchanged-file symbols are read back from the DB into resolve — no re-parse, still cross-file-correct.
+- **DD-038 L1 import ripple (affected set = changed files + direct dependents)**: covers common rename/move; transitive closure and full rebuild as `--deep`/`--force` safety nets; equivalence CI + periodic `--force` calibrate the boundary.
+- **DD-039 HNSW tombstone + threshold compaction**: O(1) mark on delete, skip at search, background rebuild past the threshold; avoid online vertex deletion breaking graph connectivity.
+- **DD-040 Community-detection threshold gating**: small changes reuse `content_sha` partitions and skip Leiden; large changes do a full re-detection.
+- **DD-041 Incremental correctness is accepted against “equivalent to full rebuild”**: incrementals are an optimisation, not a new semantics; CI per-table diffs keep the gate.
 
-## 9. 风险与对策
+## 9. Risks and mitigations
 
-- **风险：L1 漏掉传递涟漪**。对策：文档写明边界；周期性 `--force` 校准；等价性用例覆盖常见重命名/删除/移动。
-- **风险：tombstone 累积拖慢搜索 / 撑内存**。对策：阈值触发 compaction；`Stats` 暴露 tombstone 比例供观测（Phase 5 OTel）。
-- **风险：删除与并发读竞态（服务端）**。对策：Delete 走写锁（Phase 5 `RWMutex`）；compaction 用 Phase 4 的原子换图（New→Add→atomic swap）。
-- **风险：社区门控导致分区与内容不同步**。对策：门控只在 `content_sha` 不变（成员集不变）时跳过；成员集一变即触发相应重算。
-- **风险：push 传来的 changed-files 与磁盘不一致**。对策：`run_incremental` 仍以磁盘真实 `file_sha` 复核，changed-files 只作「候选集」加速。
+- **Risk: L1 misses transitive ripples**. Mitigation: document the boundary; periodic `--force` calibration; equivalence cases cover common rename/delete/move.
+- **Risk: tombstones accumulate, slowing search / inflating memory**. Mitigation: threshold-triggered compaction; `Stats` exposes tombstone ratio for observability (Phase 5 OTel).
+- **Risk: delete races with concurrent reads (server)**. Mitigation: Delete takes the write lock (Phase 5 `RWMutex`); compaction uses Phase 4 atomic graph swap (New→Add→atomic swap).
+- **Risk: community gating desyncs partitions from content**. Mitigation: skip only when `content_sha` is unchanged (membership set unchanged); any membership change triggers the corresponding recompute.
+- **Risk: `push` changed-files disagree with disk**. Mitigation: `run_incremental` still re-checks real on-disk `file_sha`; changed-files are only a “candidate set” speedup.
 
-## 10. 里程碑与演示命令
+## 10. Milestones and demo commands
 
-**里程碑**：M1 变更检测 + 删除清理（等价性打底）→ M2 增量 resolve + L1 涟漪 → M3 HNSW/Tantivy 增量逐出 → M4 社区门控 + `push` 入口 + 提速达标。
+**Milestones**: M1 change detection + delete cleanup (equivalence foundation) → M2 incremental resolve + L1 ripple → M3 HNSW/Tantivy incremental eviction → M4 community gating + `push` entry + speedup met.
 
 ```bash
-# 首次全量
+# First full index
 python -m reposage.cli index --repo /path/to/django
 
-# 改一个文件后增量（默认非 force）
+# Incremental after editing one file (default non-force)
 $EDITOR django/http/response.py
-time python -m reposage.cli index --repo /path/to/django   # 期望：秒级、仅动受影响产物
+time python -m reposage.cli index --repo /path/to/django   # expect: seconds; only affected artefacts change
 
-# 等价性校准
-python -m reposage.cli index --repo /path/to/django --force # 全量
-# CI: 增量结果与全量结果逐表 diff 必须一致
+# Equivalence calibration
+python -m reposage.cli index --repo /path/to/django --force # full
+# CI: incremental vs full per-table diffs must match
 pytest tests/ -k incremental_equivalence
 ```

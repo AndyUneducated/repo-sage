@@ -1,7 +1,7 @@
 """Shared code-aware tokeniser for sparse retrieval.
 
 Extracted so the rank-bm25 backend (`bm25.py`) and the Phase 6 Tantivy
-backend share one tokenisation口径 — otherwise swapping the sparse engine
+backend share one tokenisation contract — otherwise swapping the sparse engine
 would silently shift recall (DD-035).
 
 Tokenisation is intentionally aggressive: code identifiers like
